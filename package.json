@@ -1,0 +1,37 @@
+{
+  "name": "feishu-ai",
+  "version": "0.4.0",
+  "private": true,
+  "description": "飞书内嵌 AI 应用 - 第四阶段：飞书登录 + SQLite 按用户隔离的会话 + OpenAI Responses API 流式对话",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "ai",
+    "chat",
+    "express"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "dompurify": "^3.4.15",
+    "dotenv": "^18.0.0",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "mammoth": "^1.12.3",
+    "marked": "^18.0.13",
+    "multer": "^2.4.0",
+    "openai": "^7.18.0",
+    "pdf-parse": "^2.4.5",
+    "playwright-core": "^1.63.0",
+    "xlsx": "^0.18.5"
+  }
+}

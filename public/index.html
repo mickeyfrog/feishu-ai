@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light" />
+  <meta name="description" content="组内 AI - 飞书内嵌 AI 应用" />
+  <title>组内 AI · 飞书内嵌 AI 应用</title>
+
+  <!-- 内联 SVG 图标，不依赖任何网络图片 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234c6ef5'/%3E%3Ctext x='16' y='22' font-size='15' font-family='Segoe UI,sans-serif' font-weight='600' text-anchor='middle' fill='%23ffffff'%3EAI%3C/text%3E%3C/svg%3E" />
+
+  <!-- 前端资源版本号：改动 app.js/style.css 时 bump，防 Cloudflare 4h 浏览器缓存 -->
+  <link rel="stylesheet" href="/style.css?v=20260920-2" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- ==================== 左侧栏 ==================== -->
+    <aside class="sidebar" id="sidebar" aria-label="侧边栏">
+      <!-- 品牌区 -->
+      <div class="sidebar-brand">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" fill="currentColor"/>
+            <circle cx="18.5" cy="17.5" r="2" fill="currentColor" opacity=".65"/>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <span class="brand-title">组内 AI</span>
+          <span class="brand-sub">飞书内嵌 AI 应用</span>
+        </span>
+      </div>
+
+      <!-- 新建对话 -->
+      <div class="sidebar-actions">
+        <button type="button" class="btn-new-chat" id="newChatBtn">
+          <span class="btn-new-icon" aria-hidden="true">＋</span>
+          <span>新建对话</span>
+        </button>
+      </div>
+
+      <!-- 历史对话：登录飞书后从 /api/conversations 读取当前用户自己的会话 -->
+      <nav class="sidebar-history" aria-label="历史对话">
+        <p class="history-label">历史对话</p>
+        <ul class="history-list" id="historyList">
+          <!-- 由 app.js 渲染当前用户的真实历史会话 -->
+        </ul>
+        <p class="history-tip" id="historyTip">登录飞书后，你的对话会保存在这里</p>
+      </nav>
+
+      <!-- 底部用户区 -->
+      <div class="sidebar-user">
+        <span class="avatar avatar-sm" id="sidebarAvatar" aria-hidden="true">U</span>
+        <span class="user-text">
+          <span class="user-name" id="sidebarUserName">当前用户</span>
+          <span class="user-status" id="userStatus">未登录飞书</span>
+        </span>
+        <button type="button" class="btn-logout" id="logoutBtn" hidden>退出</button>
+      </div>
+    </aside>
+
+    <!-- 窄屏时点击遮罩关闭侧边栏 -->
+    <div class="sidebar-mask" id="sidebarMask" hidden></div>
+
+    <!-- ==================== 右侧主区域 ==================== -->
+    <main class="main">
+
+      <!-- 顶部栏 -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <button type="button" class="icon-btn menu-btn" id="menuBtn" aria-label="展开或收起侧边栏" aria-expanded="false">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <h1 class="topbar-title">组内 AI</h1>
+          <span class="model-chip" id="modelChip" title="AI 接入状态">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="modelChipText">检测中…</span>
+          </span>
+        </div>
+
+        <div class="topbar-right">
+          <button type="button" class="btn-image-gen" id="imageGenBtn" title="用 AI 生成图片">生图</button>
+          <span class="backend-state" id="backendState" title="后端连接状态">检测中…</span>
+          <!-- 登录态区域：由 app.js 依据 GET /api/me 渲染（登录按钮 或 头像+姓名） -->
+          <div class="auth-area" id="authArea"></div>
+        </div>
+      </header>
+
+      <!-- 聊天区域 -->
+      <section class="chat" id="chatScroll">
+        <div class="chat-inner">
+
+          <!-- 欢迎页（无消息时显示） -->
+          <div class="welcome" id="welcome">
+            <div class="welcome-logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" fill="currentColor"/>
+                <circle cx="18.5" cy="17.5" r="2" fill="currentColor" opacity=".65"/>
+              </svg>
+            </div>
+            <h2 class="welcome-title">有什么可以帮忙的？</h2>
+            <p class="welcome-sub">登录飞书后即可开始对话：每个人的会话与上下文相互独立，聊天记录保存在服务器，刷新后仍然存在。</p>
+
+            <div class="suggestions" id="suggestions">
+              <button type="button" class="suggestion-card" data-text="解释一下 Buck 电路">
+                <span class="suggestion-title">解释一下 Buck 电路</span>
+                <span class="suggestion-desc">用通俗的方式讲清原理</span>
+              </button>
+              <button type="button" class="suggestion-card" data-text="帮我分析 STM32 报错">
+                <span class="suggestion-title">帮我分析 STM32 报错</span>
+                <span class="suggestion-desc">粘贴报错信息一起排查</span>
+              </button>
+              <button type="button" class="suggestion-card" data-text="总结一篇论文">
+                <span class="suggestion-title">总结一篇论文</span>
+                <span class="suggestion-desc">提炼结论、方法与不足</span>
+              </button>
+              <button type="button" class="suggestion-card" data-text="帮我写 Python 代码">
+                <span class="suggestion-title">帮我写 Python 代码</span>
+                <span class="suggestion-desc">说明需求，直接给示例</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 消息列表 -->
+          <div class="messages" id="messageList" aria-live="polite"></div>
+
+        </div>
+      </section>
+
+      <!-- 底部输入区 -->
+      <footer class="composer">
+        <div class="attach-chips" id="attachChips" hidden></div>
+
+        <form class="composer-box" id="chatForm" autocomplete="off">
+          <button type="button" class="attach-btn" id="attachBtn" aria-label="上传文件" title="上传文件（pdf / word / excel / 图片等，大小不限）">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="button" class="search-toggle" id="searchToggle" aria-pressed="false" title="联网搜索：开启后每次提问先检索网页，回答带 [编号] 来源">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" fill="none"/>
+              <path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z" stroke="currentColor" stroke-width="1.6" fill="none"/>
+            </svg>
+            <span>联网</span>
+          </button>
+          <input type="file" id="fileInput" multiple hidden />
+          <textarea
+            id="messageInput"
+            class="composer-input"
+            rows="1"
+            placeholder="给 AI 发送消息..."
+            aria-label="消息输入框"
+            maxlength="4000"></textarea>
+
+          <button type="submit" class="send-btn" id="sendBtn" disabled aria-label="发送消息">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </form>
+
+        <p class="composer-hint">
+          <span>Enter 发送 · Shift + Enter 换行</span>
+          <span class="hint-sep">|</span>
+          <span>内容为空时无法发送</span>
+        </p>
+      </footer>
+
+    </main>
+  </div>
+
+  <!-- AI 生图弹窗 -->
+  <div class="modal-mask" id="imageModalMask" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="AI 生图">
+      <div class="modal-head">
+        <span class="modal-title">AI 生图</span>
+        <button type="button" class="icon-btn modal-close" id="imageModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="imagePrompt" class="modal-input" rows="3" maxlength="2000" placeholder="描述你想生成的图片，例如：一张蓝色科技风的电路插画"></textarea>
+        <div class="modal-actions">
+          <span class="modal-hint" id="imageModalHint"></span>
+          <button type="button" class="btn-primary" id="imageGenSubmit">生成</button>
+        </div>
+        <div class="image-grid" id="imageGrid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 附件预览弹窗 -->
+  <div class="modal-mask" id="previewModalMask" hidden>
+    <div class="modal modal-preview" role="dialog" aria-modal="true" aria-label="附件预览">
+      <div class="modal-head">
+        <span class="modal-title" id="previewTitle">附件预览</span>
+        <button type="button" class="icon-btn modal-close" id="previewModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="preview-body" id="previewBody"></div>
+        <div class="modal-actions">
+          <span class="modal-hint" id="previewHint"></span>
+          <a class="btn-primary preview-download" id="previewDownload" href="#" target="_blank" rel="noopener">下载原文件</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 第三方库：Markdown 解析 + XSS 清理（由后端从 node_modules 提供，不复制进 public/） -->
+  <script src="/vendor/marked.umd.js" defer></script>
+  <script src="/vendor/purify.min.js" defer></script>
+  <script src="/app.js?v=20260920-2" defer></script>
+</body>
+</html>
