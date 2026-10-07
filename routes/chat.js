@@ -35,12 +35,16 @@ import {
   listAttachmentTexts,
   setConversationExternalUrl,
   bindPendingAttachments,
-  listImagesForMessage
+  listImagesForMessage,
+  getLastMessage,
+  getLastUserMessage,
+  deleteMessageById
 } from '../database/db.js';
 import {
   isOpenAIConfigured,
   streamChat,
   completeChat,
+  isAllowedModel,
   OpenAIConfigError,
   describeOpenAIError
 } from '../services/openai.js';
@@ -153,6 +157,18 @@ async function buildContextDocuments(conversationId, userId, query, wantSearch) 
   return documents;
 }
 
+/**
+ * 读取请求体里的模型名：只接受白名单（AI_MODEL_OPTIONS）内的模型，
+ * 其它一律忽略并回落到服务端默认模型 —— 前端改包也换不了未授权的模型。
+ */
+function readRequestedModel(req) {
+  const raw = req.body && req.body.model;
+  if (typeof raw !== 'string') return undefined;
+  const name = raw.trim();
+  if (!name) return undefined;
+  return isAllowedModel(name) ? name : undefined;
+}
+
 /** 读取请求体里的联网开关：前端 search=true 且服务端未禁用才生效 */
 function readSearchFlag(req) {
   return Boolean(req.body && req.body.search === true) && isWebSearchEnabled();
@@ -199,16 +215,21 @@ function saveUserMessageAndMaybeTitle(conversation, text) {
  *   2. 其中的图片以 base64 内联挂到历史里这条消息上（多模态视觉），仅当前消息，历史不重复发图。
  * AI_VISION=false 可整体关闭图片内联（比如模型不支持视觉时）。
  */
-function bindAttachmentsAndApplyImages(conversation, userId, userMessage, history) {
-  bindPendingAttachments(conversation.id, userId, userMessage.id);
+function attachImagesForMessage(history, messageId) {
   if (String(process.env.AI_VISION || 'true').trim() === 'false') return;
-  const rows = listImagesForMessage(userMessage.id);
+  const rows = listImagesForMessage(messageId);
   if (!rows.length) return;
   const images = loadImagesAsBase64(rows);
   if (!images.length) return;
-  // history 最后一条就是刚保存的这条 user 消息
+  // history 最后一条应该就是这条 user 消息
   const last = history[history.length - 1];
-  if (last && last.role === 'user' && last.id === userMessage.id) last.images = images;
+  if (last && last.role === 'user' && last.id === messageId) last.images = images;
+}
+
+/** 正常发送：绑定待发附件 + 内联图片 */
+function bindAttachmentsAndApplyImages(conversation, userId, userMessage, history) {
+  bindPendingAttachments(conversation.id, userId, userMessage.id);
+  attachImagesForMessage(history, userMessage.id);
 }
 
 /** 写一条 SSE 数据帧：data: {json}\n\n */
@@ -281,6 +302,7 @@ router.post('/:id/chat', async (req, res) => {
   if (!ensureAIConfigured(res)) return undefined;
 
   const wantSearch = readSearchFlag(req);
+  const requestedModel = readRequestedModel(req);
 
   // 并发保护：同一会话同时只允许一个生成任务
   if (!acquireGeneration(conversation.id)) {
@@ -299,14 +321,14 @@ router.post('/:id/chat', async (req, res) => {
       const result = await runBrowserChat(conversation, text, documents, undefined, undefined);
       answer = result.text;
     } else {
-      answer = await completeChat(history, { documents: documents });
+      answer = await completeChat(history, { documents: documents, model: requestedModel });
     }
 
     if (!answer || !answer.trim()) {
       return res.status(502).json({ success: false, message: AI_ERROR_TEXT });
     }
 
-    const reply = addMessage(conversation.id, 'assistant', answer);
+    const reply = addMessage(conversation.id, 'assistant', answer, requestedModel);
     touchConversation(conversation.id);
 
     return res.json({
@@ -341,8 +363,22 @@ router.post('/:id/chat/stream', async (req, res) => {
   const conversation = loadOwnedConversation(req, res);
   if (!conversation) return undefined;
 
-  const text = readUserMessage(req, res);
-  if (text === null) return undefined;
+  // regenerate=true：不新增用户消息，直接以「最后一条用户消息」重答（先删掉旧回答）
+  const regenerate = Boolean(req.body && req.body.regenerate === true);
+  const requestedModel = readRequestedModel(req);
+
+  let plan;
+  if (regenerate) {
+    const lastUser = getLastUserMessage(conversation.id);
+    if (!lastUser) {
+      return res.status(400).json({ success: false, message: '没有可重新生成的消息' });
+    }
+    plan = { regenerate: true, text: lastUser.content, userMessage: lastUser, title: conversation.title };
+  } else {
+    const text = readUserMessage(req, res);
+    if (text === null) return undefined;
+    plan = { regenerate: false, text: text, userMessage: null, title: null };
+  }
 
   // 注意：SSE 一旦开始输出就无法再改状态码，
   // 所以「配置检查」和「并发检查」都必须在写 SSE 头之前完成
@@ -354,7 +390,7 @@ router.post('/:id/chat/stream', async (req, res) => {
   }
 
   try {
-    await runStreamGeneration(res, conversation, text, req.session.user.id, wantSearch);
+    await runStreamGeneration(res, conversation, plan, req.session.user.id, wantSearch, requestedModel);
   } finally {
     releaseGeneration(conversation.id);
   }
@@ -362,8 +398,20 @@ router.post('/:id/chat/stream', async (req, res) => {
 });
 
 /** SSE 生成主体：写头 -> 逐段下发 -> 成功后一次性落库 / 失败发 error 事件 */
-async function runStreamGeneration(res, conversation, text, userId, wantSearch) {
-  const { userMessage, title } = saveUserMessageAndMaybeTitle(conversation, text);
+async function runStreamGeneration(res, conversation, plan, userId, wantSearch, requestedModel) {
+  let text = plan.text;
+  let title = plan.title;
+  let userMessage = plan.userMessage;
+
+  // 重新生成：先删掉当前最后一条 assistant 消息（旧的/失败的回答），用户消息保持不动
+  if (plan.regenerate) {
+    const last = getLastMessage(conversation.id);
+    if (last && last.role === 'assistant') deleteMessageById(last.id);
+  } else {
+    const saved = saveUserMessageAndMaybeTitle(conversation, text);
+    userMessage = saved.userMessage;
+    title = saved.title;
+  }
 
   /* -------- 建立 SSE 响应 -------- */
   res.status(200);
@@ -402,11 +450,23 @@ async function runStreamGeneration(res, conversation, text, userId, wantSearch) 
   };
 
   try {
-    sseSend(res, { type: 'start', conversationId: conversation.id, title, search: wantSearch === true });
+    sseSend(res, {
+      type: 'start',
+      conversationId: conversation.id,
+      title,
+      search: wantSearch === true,
+      model: requestedModel || undefined,          // 本次实际使用的模型（未指定则为服务端默认）
+      ...(userMessage ? { userMessageId: userMessage.id } : {})
+    });
 
     const documents = await buildContextDocuments(conversation.id, userId, text, wantSearch);
     const history = listMessages(conversation.id);
-    bindAttachmentsAndApplyImages(conversation, userId, userMessage, history);
+    if (plan.regenerate) {
+      // 重答：附件早已绑定在这条用户消息上，只需重新内联图片
+      if (userMessage) attachImagesForMessage(history, userMessage.id);
+    } else {
+      bindAttachmentsAndApplyImages(conversation, userId, userMessage, history);
+    }
 
     // 内存累积 + 逐段下发；数据库只在流结束后写一次
     let answer;
@@ -423,7 +483,7 @@ async function runStreamGeneration(res, conversation, text, userId, wantSearch) 
       answer = await streamChat(history, (delta) => {
         if (clientGone) throw new ClientGoneError();
         sseSend(res, { type: 'delta', text: delta });
-      }, { signal: abortController.signal, documents: documents });
+      }, { signal: abortController.signal, documents: documents, model: requestedModel });
     }
 
     if (clientGone) {
@@ -436,13 +496,14 @@ async function runStreamGeneration(res, conversation, text, userId, wantSearch) 
       return finish();
     }
 
-    const assistantMessage = addMessage(conversation.id, 'assistant', answer);
+    const assistantMessage = addMessage(conversation.id, 'assistant', answer, requestedModel);
     touchConversation(conversation.id);
 
     sseSend(res, {
       type: 'done',
       messageId: assistantMessage.id,
       title: title,
+      model: assistantMessage.model || undefined,
       ...(fullText ? { fullText: fullText } : {})
     });
     return finish();

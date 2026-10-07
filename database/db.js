@@ -96,6 +96,22 @@ if (convCols.indexOf('external_url') === -1) {
   db.exec('ALTER TABLE conversations ADD COLUMN external_url TEXT');
 }
 
+// 幂等迁移：users.username / password_hash（本地账号注册登录，2026-09-24 替代飞书 OAuth）
+const userCols = db.prepare('PRAGMA table_info(users)').all().map(function (c) { return c.name; });
+if (userCols.indexOf('username') === -1) {
+  db.exec('ALTER TABLE users ADD COLUMN username TEXT');
+}
+if (userCols.indexOf('password_hash') === -1) {
+  db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL');
+
+// 幂等迁移：messages.model（记录这条 AI 回复由哪个模型生成，前端展示用）
+const msgCols = db.prepare('PRAGMA table_info(messages)').all().map(function (c) { return c.name; });
+if (msgCols.indexOf('model') === -1) {
+  db.exec('ALTER TABLE messages ADD COLUMN model TEXT');
+}
+
 // 幂等迁移：attachments.message_id（附件绑定到具体消息；NULL = 输入框里的待发附件）
 const attCols = db.prepare('PRAGMA table_info(attachments)').all().map(function (c) { return c.name; });
 if (attCols.indexOf('message_id') === -1) {
@@ -147,8 +163,16 @@ const stmt = {
     LIMIT ?
   `),
   countMessages: db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?'),
-  addMessage: db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)'),
-  messageById: db.prepare('SELECT id, role, content, created_at AS createdAt FROM messages WHERE id = ?'),
+  addMessage: db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)'),
+  messageById: db.prepare('SELECT id, conversation_id AS conversationId, role, content, model, created_at AS createdAt FROM messages WHERE id = ?'),
+  lastMessage: db.prepare('SELECT id, conversation_id AS conversationId, role, content, model FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1'),
+  lastUserMessage: db.prepare("SELECT id, conversation_id AS conversationId, role, content, model FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1"),
+  updateMessageContent: db.prepare('UPDATE messages SET content = ? WHERE id = ?'),
+  deleteMessageById: db.prepare('DELETE FROM messages WHERE id = ?'),
+  deleteMessagesFrom: db.prepare('DELETE FROM messages WHERE conversation_id = ? AND id >= ?'),
+  // 将随消息一起删除的附件（返回 id 与磁盘名，供路由层删文件）
+  attachmentsFromMessage: db.prepare('SELECT id, stored_name AS storedName FROM attachments WHERE conversation_id = ? AND message_id IS NOT NULL AND message_id >= ?'),
+  deleteAttachmentsFromMessage: db.prepare('DELETE FROM attachments WHERE conversation_id = ? AND message_id IS NOT NULL AND message_id >= ?'),
 
   addAttachment: db.prepare('INSERT INTO attachments (conversation_id, user_id, message_id, filename, mime, size, stored_name, extracted_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
   // 输入框 chips 只列「待发」附件（message_id IS NULL）；已发送的随消息气泡展示
@@ -190,6 +214,27 @@ export function upsertFeishuUser({ feishuUserId, name, avatar }) {
     avatar: avatar || ''
   });
   return stmt.userByFeishuId.get(feishuUserId);
+}
+
+/* ----------------------------- 本地账号（注册/登录） ----------------------------- */
+
+const LOCAL_ID_PREFIX = 'local:';
+
+/** 用户名是否已注册 */
+export function getUserByUsername(username) {
+  return db.prepare('SELECT * FROM users WHERE username = ?').get(String(username || ''));
+}
+
+/**
+ * 创建本地账号。username 唯一（重复抛 UNIQUE 错误，由路由层转成 409）。
+ * feishu_user_id 写入 local:<username> 占位，兼容旧表的唯一约束（旧飞书数据不受影响）。
+ */
+export function createLocalUser(username, passwordHash) {
+  const uname = String(username || '').trim();
+  const info = db.prepare(
+    'INSERT INTO users (feishu_user_id, name, avatar, username, password_hash) VALUES (?, ?, ?, ?, ?)'
+  ).run(LOCAL_ID_PREFIX + uname, uname, '', uname, passwordHash);
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid));
 }
 
 /* ----------------------------- conversations ----------------------------- */
@@ -250,15 +295,57 @@ export function countMessages(conversationId) {
   return stmt.countMessages.get(conversationId).n;
 }
 
-export function addMessage(conversationId, role, content) {
+export function addMessage(conversationId, role, content, model) {
   if (!ALLOWED_ROLES.has(role)) {
     throw new Error('非法的消息 role：' + role);
   }
-  const info = stmt.addMessage.run(conversationId, role, String(content));
+  const info = stmt.addMessage.run(conversationId, role, String(content), model ? String(model) : null);
   return stmt.messageById.get(info.lastInsertRowid);
 }
 
 
+
+/* ----------------------------- messages（补充操作） ----------------------------- */
+
+/** 会话最后一条消息（重新生成时判断是否要删掉旧回答） */
+export function getLastMessage(conversationId) {
+  return stmt.lastMessage.get(conversationId);
+}
+
+/** 会话最后一条用户消息（重新生成 / 编辑后重答的输入） */
+export function getLastUserMessage(conversationId) {
+  return stmt.lastUserMessage.get(conversationId);
+}
+
+/** 按 id 取消息（含 conversationId，供归属校验） */
+export function getMessageById(messageId) {
+  return stmt.messageById.get(messageId);
+}
+
+/** 改写消息内容（仅用于用户消息的编辑） */
+export function updateMessageContent(messageId, content) {
+  return stmt.updateMessageContent.run(String(content), messageId).changes > 0;
+}
+
+/** 删除单条消息 */
+export function deleteMessageById(messageId) {
+  return stmt.deleteMessageById.run(messageId).changes > 0;
+}
+
+/** 删除该会话中 id >= fromMessageId 的全部消息（编辑 / 删除后级联清理） */
+export function deleteMessagesFrom(conversationId, fromMessageId) {
+  return stmt.deleteMessagesFrom.run(conversationId, fromMessageId).changes;
+}
+
+/** 找出将随消息删除的附件（返回 { id, storedName }，路由层负责删磁盘文件） */
+export function listAttachmentsFromMessage(conversationId, fromMessageId) {
+  return stmt.attachmentsFromMessage.all(conversationId, fromMessageId);
+}
+
+/** 删除这些消息绑定的附件记录 */
+export function deleteAttachmentsFromMessage(conversationId, fromMessageId) {
+  return stmt.deleteAttachmentsFromMessage.run(conversationId, fromMessageId).changes;
+}
 
 /* ----------------------------- attachments ----------------------------- */
 

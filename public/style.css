@@ -5,38 +5,86 @@
    ========================================================================== */
 
 /* ---------------------------- 设计变量 ---------------------------- */
+/* ============================================================
+   设计 token —— 参考 Open WebUI（中性灰阶 + 蓝色主色 + 暗色模式）
+   浅色：gray-50/100/200/500/900 + blue-600；暗色：gray-950/900/800 + blue-500
+   ============================================================ */
 :root {
-  /* 颜色 */
+  color-scheme: light;
+
+  /* 颜色（浅色） */
   --bg: #ffffff;
-  --bg-soft: #f7f7f8;
-  --sidebar-bg: #f9f9fb;
-  --border: #e6e7eb;
-  --border-strong: #d8dae0;
+  --bg-soft: #f9fafb;
+  --bg-elevated: #ffffff;
+  --sidebar-bg: #f9fafb;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
 
-  --text: #1f2328;
+  --text: #111827;
   --text-muted: #6b7280;
-  --text-faint: #9aa0a6;
+  --text-faint: #9ca3af;
 
-  --primary: #4c6ef5;
-  --primary-hover: #4263eb;
-  --primary-soft: #eef1fe;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-soft: #eff6ff;
+  --primary-contrast: #ffffff;
 
-  --user-bubble: #f1f2f4;
-  --danger: #e5484d;
+  --user-bubble: #f3f4f6;
+  --hover-bg: rgba(17, 24, 39, 0.045);
+  --active-bg: rgba(37, 99, 235, 0.08);
+  --danger: #dc2626;
   --ok: #16a34a;
 
   /* 尺寸 */
-  --sidebar-width: 264px;
-  --topbar-height: 60px;
-  --content-max: 780px;
+  --sidebar-width: 260px;
+  --topbar-height: 56px;
+  --content-max: 768px;
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 20px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
 
   /* 阴影 */
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.08);
-  --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14);
+  --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.07);
+  --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.12);
+
+  /* 字体栈（Inter 优先，中文回退到系统字体） */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+/* 暗色主题：html[data-theme="dark"]（由 app.js 设置并持久化到 localStorage） */
+html[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #171717;
+  --bg-soft: #1f1f1f;
+  --bg-elevated: #212121;
+  --sidebar-bg: #121212;
+  --border: #2e2e2e;
+  --border-strong: #404040;
+
+  --text: #f5f5f5;
+  --text-muted: #a3a3a3;
+  --text-faint: #737373;
+
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-soft: rgba(59, 130, 246, 0.16);
+  --primary-contrast: #ffffff;
+
+  --user-bubble: #262626;
+  --hover-bg: rgba(255, 255, 255, 0.06);
+  --active-bg: rgba(59, 130, 246, 0.16);
+  --danger: #f87171;
+  --ok: #4ade80;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
 
 /* ---------------------------- 基础重置 ---------------------------- */
@@ -53,8 +101,7 @@ body {
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.6;
   color: var(--text);
@@ -74,6 +121,12 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
 }
 
 ul {
@@ -1938,4 +1991,851 @@ h1, h2, h3, p {
 .chat::-webkit-scrollbar-thumb:hover,
 .history-list::-webkit-scrollbar-thumb:hover {
   background: rgba(76, 110, 245, 0.32);
+}
+
+/* ---------------------------- 本地账号 登录/注册 ---------------------------- */
+.auth-panel[hidden] {
+  display: none;
+}
+
+.auth-panel {
+  width: 300px;
+  margin: 18px auto 4px;
+  padding: 18px 18px 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 6px;
+  background: var(--bg-soft);
+  border-radius: 9px;
+  padding: 3px;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.auth-tab.is-active {
+  background: #fff;
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.auth-input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.auth-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.auth-submit {
+  padding: 9px 0;
+  border-radius: 9px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-error {
+  margin: 0;
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--danger, #d33);
+  text-align: center;
+}
+
+
+/* ============================================================
+   Open WebUI 风格改版层（2026-10-07）
+   参考 https://github.com/open-webui/open-webui 的视觉语言：
+   - 中性灰底 + 白色内容面 + 细边框（gray-200）
+   - 蓝色主色（blue-600 / 暗色 blue-500）
+   - 圆角更大、留白更多、消息无气泡（用户消息浅灰气泡靠右）
+   - 完整暗色模式（html[data-theme="dark"]）
+   ============================================================ */
+
+/* ---------------- 品牌 & 侧边栏 ---------------- */
+.sidebar {
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+}
+
+.brand-logo {
+  border-radius: 12px;
+  background: linear-gradient(135deg, #3b82f6, #2563eb 60%, #1d4ed8);
+  box-shadow: none;
+}
+
+.brand-title {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.brand-sub {
+  color: var(--text-faint);
+}
+
+.btn-new-chat {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  border-radius: 12px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.btn-new-chat:hover:not(:disabled) {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+}
+
+.btn-new-chat:disabled,
+.btn-new-chat.is-disabled {
+  opacity: 0.55;
+}
+
+/* 会话搜索框 */
+.chat-search {
+  position: relative;
+  padding: 0 12px 8px;
+}
+
+.chat-search input {
+  width: 100%;
+  padding: 8px 12px 8px 32px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-search input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.chat-search input::placeholder {
+  color: var(--text-faint);
+}
+
+.chat-search .search-icon {
+  position: absolute;
+  left: 24px;
+  top: 50%;
+  transform: translateY(-60%);
+  color: var(--text-faint);
+  pointer-events: none;
+  display: grid;
+}
+
+/* 历史列表 */
+.history-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.history-item {
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.history-item:hover {
+  background: var(--hover-bg);
+}
+
+.history-item.active {
+  background: var(--active-bg);
+}
+
+.history-icon {
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.history-item.active .history-icon {
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+.history-title {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 侧栏底部用户 */
+.sidebar-user {
+  border-top: 1px solid var(--border);
+}
+
+.user-name {
+  font-weight: 600;
+}
+
+.btn-logout {
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.btn-logout:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+/* ---------------- 顶栏 ---------------- */
+.topbar {
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.model-chip {
+  background: var(--bg-soft);
+  border-color: var(--border);
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.model-chip .dot {
+  background: var(--text-faint);
+}
+
+.model-chip.ready .dot {
+  background: var(--ok);
+}
+
+.model-chip.ready {
+  color: var(--text-muted);
+}
+
+.btn-image-gen {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-radius: 999px;
+  font-weight: 600;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.btn-image-gen:hover {
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+.backend-state {
+  font-size: 12px;
+}
+
+/* 主题切换按钮 */
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--text-muted);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.theme-toggle:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.theme-toggle .icon-sun { display: none; }
+.theme-toggle .icon-moon { display: grid; }
+html[data-theme='dark'] .theme-toggle .icon-sun { display: grid; }
+html[data-theme='dark'] .theme-toggle .icon-moon { display: none; }
+
+.icon-btn {
+  border-radius: 10px;
+  color: var(--text-muted);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.icon-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+/* 当前用户 chip */
+.current-user {
+  border-radius: 999px;
+  padding: 3px 10px 3px 4px;
+  transition: background 0.15s ease;
+}
+
+.current-user:hover {
+  background: var(--hover-bg);
+}
+
+/* ---------------- 聊天区 ---------------- */
+.chat-inner {
+  max-width: var(--content-max);
+}
+
+.msg-avatar {
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+}
+
+.msg-ai .msg-body {
+  max-width: 100%;
+}
+
+.msg-role {
+  font-weight: 650;
+  color: var(--text);
+}
+
+/* 用户消息：右上浅灰气泡 */
+.msg-user {
+  justify-content: flex-end;
+}
+
+.msg-user .msg-body {
+  background: var(--user-bubble);
+  border-radius: 16px;
+  padding: 10px 14px;
+  max-width: 82%;
+}
+
+/* 助手消息：无气泡，直接铺在页面上 */
+.msg-ai .msg-text {
+  color: var(--text);
+}
+
+.msg-text pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.msg-text code {
+  background: var(--bg-soft);
+  border-radius: 6px;
+}
+
+.msg-text pre code {
+  background: transparent;
+  border: 0;
+}
+
+/* 打字点 */
+.typing-dots span {
+  background: var(--text-faint);
+}
+
+/* ---------------- 输入区 ---------------- */
+.composer {
+  background: linear-gradient(to top, var(--bg) 62%, transparent);
+}
+
+.composer-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+}
+
+.composer-box:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.attach-btn {
+  border-radius: 10px;
+  color: var(--text-muted);
+}
+
+.attach-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.search-toggle {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--bg);
+}
+
+.search-toggle:hover {
+  background: var(--hover-bg);
+}
+
+.search-toggle.is-on {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: var(--primary);
+  box-shadow: none;
+}
+
+.send-btn {
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  transition: background 0.15s ease, opacity 0.15s ease, transform 0.08s ease;
+}
+
+.send-btn:disabled {
+  background: var(--border-strong);
+  color: var(--bg);
+  opacity: 0.7;
+}
+
+.send-btn:not(:disabled):hover {
+  background: var(--primary-hover);
+}
+
+.composer-hint {
+  color: var(--text-faint);
+}
+
+/* ---------------- 欢迎页 ---------------- */
+.welcome-logo {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  border-radius: 18px;
+  box-shadow: var(--shadow-md);
+}
+
+.welcome-title {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.welcome-sub {
+  color: var(--text-muted);
+}
+
+.suggestion-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: none;
+}
+
+.suggestion-card:hover {
+  background: var(--bg-soft);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.suggestion-title {
+  font-weight: 600;
+}
+
+.suggestion-desc {
+  color: var(--text-muted);
+}
+
+/* ---------------- 附件 chip / 预览 ---------------- */
+.attach-chip {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  border-radius: 10px;
+}
+
+.msg-att {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+}
+
+.msg-user .msg-att {
+  background: var(--bg-soft);
+}
+
+/* ---------------- 弹窗 ---------------- */
+.modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-title {
+  font-weight: 650;
+}
+
+.modal-input {
+  background: var(--bg);
+  border-color: var(--border);
+  border-radius: 12px;
+  color: var(--text);
+}
+
+.modal-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.modal-mask {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme='dark'] .modal-mask {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* ---------------- 登录面板 ---------------- */
+.auth-panel {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+}
+
+.auth-tabs {
+  background: var(--bg-soft);
+}
+
+.auth-tab.is-active {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.auth-input {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+  border-radius: 10px;
+}
+
+.auth-input::placeholder {
+  color: var(--text-faint);
+}
+
+/* ---------------- 暗色模式细节修正 ---------------- */
+html[data-theme='dark'] .brand-logo,
+html[data-theme='dark'] .welcome-logo,
+html[data-theme='dark'] .msg-avatar {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+}
+
+html[data-theme='dark'] .send-btn:disabled {
+  background: #3f3f46;
+  color: #71717a;
+}
+
+html[data-theme='dark'] .sidebar-mask {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+html[data-theme='dark'] .preview-body {
+  background: var(--bg-soft);
+}
+
+html[data-theme='dark'] .image-grid img,
+html[data-theme='dark'] .preview-img {
+  background: var(--bg-soft);
+}
+
+/* 平滑主题切换 */
+body,
+.sidebar,
+.topbar,
+.composer-box,
+.suggestion-card,
+.modal,
+.auth-panel,
+.history-item {
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+
+/* ---------------- 模型选择器（Open WebUI 风格） ---------------- */
+.model-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.model-chip {
+  cursor: pointer;
+  user-select: none;
+}
+
+.model-chip:hover {
+  background: var(--hover-bg);
+}
+
+.model-caret {
+  opacity: 0.55;
+}
+
+.model-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 210px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-menu[hidden] {
+  display: none;
+}
+
+.model-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text);
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+
+.model-menu-item:hover {
+  background: var(--hover-bg);
+}
+
+.model-menu-item.is-active {
+  background: var(--active-bg);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.model-menu-item .check {
+  margin-left: auto;
+  color: var(--primary);
+}
+
+/* ---------------- 消息操作条（hover 出现） ---------------- */
+.msg-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.msg:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+  border-radius: 7px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.msg-action:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.msg-action.is-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--danger);
+}
+
+/* 消息模型标签 */
+.msg-model-tag {
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-faint);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+/* 行内编辑 */
+.msg-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: min(520px, 60vw);
+}
+
+.msg-edit-input {
+  width: 100%;
+  min-height: 76px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  resize: vertical;
+  outline: none;
+}
+
+.msg-edit-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.msg-edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.msg-edit-btn {
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--text-muted);
+}
+
+.msg-edit-btn.is-primary {
+  background: var(--primary);
+  color: var(--primary-contrast);
+}
+
+.msg-edit-btn.is-primary:hover {
+  background: var(--primary-hover);
+}
+
+/* ---------------- 停止生成按钮 ---------------- */
+.send-btn.is-stop {
+  background: var(--danger);
+}
+
+.send-btn.is-stop:hover {
+  background: #b91c1c;
+}
+
+/* ---------------- 代码块复制按钮 ---------------- */
+.msg-text pre {
+  position: relative;
+  padding-top: 34px;
+}
+
+.code-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.msg-text pre:hover .code-copy,
+.code-copy:focus-visible {
+  opacity: 1;
+}
+
+.code-copy:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.code-copy.is-done {
+  color: var(--ok);
+  border-color: var(--ok);
+  opacity: 1;
+}
+
+
+/* ============================================================
+   暗色模式修正层：清掉历史遗留的硬编码白色 / 深色渐变文字
+   ============================================================ */
+html[data-theme='dark'] .chat::before,
+html[data-theme='dark'] .composer::before {
+  background: none;
+}
+
+/* composer 聚焦时的白色渐变边框（历史遗留）在暗色下换成深色 */
+html[data-theme='dark'] .composer-box:focus-within {
+  background: var(--bg-elevated);
+  border-color: var(--primary);
+}
+
+/* 欢迎标题：浅色下是深色渐变文字，暗色下换成亮色渐变 */
+html[data-theme='dark'] .welcome-title {
+  background: linear-gradient(120deg, #f5f5f5 25%, #93c5fd 65%, #c4b5fd 95%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 其余历史遗留的白色面板（弹窗 / 卡片 / 菜单等）统一走 token */
+html[data-theme='dark'] .conv-menu,
+html[data-theme='dark'] .modal,
+html[data-theme='dark'] .image-grid img,
+html[data-theme='dark'] .suggestion-card,
+html[data-theme='dark'] .btn-new-chat,
+html[data-theme='dark'] .attach-chip,
+html[data-theme='dark'] .msg-att,
+html[data-theme='dark'] .code-copy {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+html[data-theme='dark'] .msg-user .msg-att {
+  background: var(--user-bubble);
+}
+
+/* 输入框滚动条 */
+html[data-theme='dark'] .composer-input::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+
+html[data-theme='dark'] .preview-body {
+  background: var(--bg-soft);
 }

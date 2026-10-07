@@ -673,3 +673,30 @@ AI_BROWSER_PROJECT_URL=https://chatgpt.com/g/<你的项目id>/project
 不要假设它拥有与 OpenAI 官方相同的数据处理政策。
 本项目发给 AI Provider 的内容**只包含模型请求所需的聊天消息**，
 不会发送飞书 App Secret、Session Secret、飞书 access token、数据库 user_id 或用户 Cookie。
+
+## 十六、界面与交互（参考 Open WebUI，2026-10-07）
+
+界面与功能模块参考 [open-webui/open-webui](https://github.com/open-webui/open-webui) 的设计：
+
+**视觉**
+- 中性灰阶 + 蓝色主色（blue-600 / 暗色 blue-500），字体栈 Inter 优先
+- **深色 / 浅色主题**：顶栏月亮/太阳按钮切换，localStorage 持久化，首次访问跟随系统偏好
+- 消息布局：用户消息浅灰气泡靠右，AI 消息无气泡 + 圆形头像，内容列最大 768px
+
+**功能模块**
+| 模块 | 说明 |
+| --- | --- |
+| 模型选择器 | 顶栏点击模型名切换（白名单来自 `AI_MODEL_OPTIONS`），选择持久化；每条 AI 回答下方显示所用模型 |
+| 消息操作 | 鼠标悬停消息出现：复制 / 重新生成（AI）/ 编辑（用户）/ 删除 |
+| 编辑重答 | 编辑用户消息后自动删除其后内容并重新回答（等价 Open WebUI 的 edit & resend） |
+| 重新生成 | 删掉最后一条回答，基于同一条提问重答（服务端 `regenerate: true`） |
+| 停止生成 | 生成中发送按钮变成「停止」，点击中断流式请求，半截回答不落库 |
+| 代码块复制 | Markdown 代码块右上角一键复制 |
+| 导出对话 | 会话菜单「导出 Markdown」，下载完整会话（含附件名与所用模型） |
+| 会话搜索 | 侧边栏搜索框，前端实时过滤历史会话 |
+
+**新增/变更接口**
+- `GET /api/models`：可选模型列表（不含任何密钥）
+- `PATCH /api/conversations/:id/messages/:messageId`：编辑用户消息（删除其后内容）
+- `DELETE /api/conversations/:id/messages/:messageId`：删除该消息及其之后的内容（含绑定附件）
+- `POST /api/conversations/:id/chat/stream`：新增 `regenerate` / `model` 字段；start 事件回传 `userMessageId`，done 事件回传 `model`

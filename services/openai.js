@@ -107,7 +107,30 @@ function getClient() {
   return client;
 }
 
-function getModel() {
+/**
+ * 可选模型列表（前端模型选择器用）：
+ *   AI_MODEL_OPTIONS=gpt-6.1-sol,kimi-k3,gpt-5.6-sol   （逗号分隔）
+ * 未配置时只有默认模型一项；默认模型始终在列表里。
+ */
+export function getModelOptions() {
+  const { model: def } = getAIConfig();
+  const raw = String(process.env.AI_MODEL_OPTIONS || '');
+  const list = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  if (def && list.indexOf(def) === -1) list.unshift(def);
+  return list;
+}
+
+/** 请求里带的模型是否允许使用（防注入：只允许白名单内的模型名） */
+export function isAllowedModel(name) {
+  const chosen = String(name || '').trim();
+  if (!chosen) return false;
+  return getModelOptions().indexOf(chosen) > -1;
+}
+
+function getModel(override) {
+  // 允许按请求覆盖模型（前端模型选择器）；由路由层对照白名单校验后才传进来
+  const chosen = String(override || '').trim();
+  if (chosen) return chosen;
   const { model } = getAIConfig();
   if (!model) throw new OpenAIConfigError();
   return model;
@@ -174,17 +197,17 @@ function buildInstructions(documents) {
 }
 
 /** Responses 模式请求体 */
-function buildResponsesRequest(messages, documents) {
+function buildResponsesRequest(messages, documents, modelOverride) {
   const input = buildInput(messages);
   return {
-    model: getModel(),
+    model: getModel(modelOverride),
     instructions: buildInstructions(documents),
     input: input.map(function (m, i) { return toMultimodalMessage(m, i === input.length - 1, 'responses'); })
   };
 }
 
 /** Chat Completions 模式请求体：system + 历史消息 */
-function buildChatMessages(messages, documents) {
+function buildChatMessages(messages, documents, modelOverride) {
   const input = buildInput(messages);
   return [{ role: 'system', content: buildInstructions(documents) }].concat(
     input.map(function (m, i) { return toMultimodalMessage(m, i === input.length - 1, 'chat_completions'); })
@@ -278,7 +301,7 @@ async function streamResponses(messages, onDelta, options) {
   const watchdog = createIdleWatchdog(options && options.signal ? options.signal : null);
   try {
     const stream = await getClient().responses.create(
-      Object.assign({}, buildResponsesRequest(messages, options && options.documents), { stream: true }),
+      Object.assign({}, buildResponsesRequest(messages, options && options.documents, options && options.model), { stream: true }),
       { signal: watchdog.signal }
     );
     let full = '';
@@ -317,8 +340,8 @@ async function streamChatCompletions(messages, onDelta, options) {
   const watchdog = createIdleWatchdog(options && options.signal ? options.signal : null);
   try {
     const stream = await getClient().chat.completions.create({
-      model: getModel(),
-      messages: buildChatMessages(messages, options && options.documents),
+      model: getModel(options && options.model),
+      messages: buildChatMessages(messages, options && options.documents, options && options.model),
       stream: true
     }, { signal: watchdog.signal });
 
@@ -359,14 +382,14 @@ export async function completeChat(messages, options) {
   try {
     if (mode === 'chat_completions') {
       const response = await getClient().chat.completions.create({
-        model: getModel(),
-        messages: buildChatMessages(messages, options && options.documents),
+        model: getModel(options && options.model),
+        messages: buildChatMessages(messages, options && options.documents, options && options.model),
         stream: false
       }, { signal: watchdog.signal });
       if (watchdog.isTimedOut()) throw new OpenAITimeoutError();
       return extractChatText(response);
     }
-    const response = await getClient().responses.create(buildResponsesRequest(messages, options && options.documents), { signal: watchdog.signal });
+    const response = await getClient().responses.create(buildResponsesRequest(messages, options && options.documents, options && options.model), { signal: watchdog.signal });
     if (watchdog.isTimedOut()) throw new OpenAITimeoutError();
     return extractText(response);
   } catch (err) {

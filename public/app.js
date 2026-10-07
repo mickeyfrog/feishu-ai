@@ -25,7 +25,7 @@
   var STREAM_ERROR_TEXT          = 'AI 回复失败，请重试。';
   var NETWORK_ERROR_TEXT         = '请求失败，请检查服务器状态。';
   var NORMAL_PLACEHOLDER         = '给 AI 发送消息...';
-  var LOGIN_REQUIRED_PLACEHOLDER = '使用飞书登录后开始对话';
+  var LOGIN_REQUIRED_PLACEHOLDER = '登录后开始对话';
   var DEFAULT_TITLE              = '新对话';
   var TITLE_MAX_LENGTH           = 100;
   var INPUT_MAX_HEIGHT           = 180;   // 输入框自动增高的上限（与 CSS 保持一致）
@@ -52,8 +52,18 @@
   var backendState    = document.getElementById('backendState');
   var modelChip       = document.getElementById('modelChip');
   var modelChipText   = document.getElementById('modelChipText');
+  var modelMenu       = document.getElementById('modelMenu');
   var authArea        = document.getElementById('authArea');
   var logoutBtn       = document.getElementById('logoutBtn');
+  var themeToggle     = document.getElementById('themeToggle');
+  var chatSearchInput = document.getElementById('chatSearch');
+  var authPanel       = document.getElementById('authPanel');
+  var authTabLogin    = document.getElementById('tabLogin');
+  var authTabRegister = document.getElementById('tabRegister');
+  var authUsername    = document.getElementById('authUsername');
+  var authPassword    = document.getElementById('authPassword');
+  var authSubmit      = document.getElementById('authSubmit');
+  var authError       = document.getElementById('authError');
   var userStatus      = document.getElementById('userStatus');
   var sidebarAvatar   = document.getElementById('sidebarAvatar');
   var sidebarUserName = document.getElementById('sidebarUserName');
@@ -81,6 +91,10 @@
   var conversations           = [];    // 当前用户自己的会话列表
   var currentConversationId   = null;  // 当前打开的会话；null 表示停留在欢迎页
   var isSending               = false; // 是否正在生成 AI 回复（防止重复发送）
+  var isUploading             = false; // 是否有附件正在上传（上传完成前禁止发送，避免消息漏掉附件）
+  var availableModels         = [];    // 服务端允许的模型列表（GET /api/models）
+  var selectedModel           = '';    // 当前选择的模型（localStorage 持久化）
+  var activeStream            = null;  // 正在进行的流式请求 { controller }，用于「停止生成」
   var maskTimer               = null;  // 侧边栏遮罩隐藏定时器
   var openMenuEl              = null;  // 当前展开的「⋯」菜单
   var streamTarget            = null;  // 正在流式渲染的 .msg-text 元素
@@ -246,16 +260,25 @@
     clearChildren(historyList);
 
     if (!currentUser) {
-      setHistoryTip('登录飞书后，你的对话会保存在这里');
+      setHistoryTip('登录后，你的对话会保存在这里');
       return;
     }
     if (!conversations.length) {
       setHistoryTip('还没有对话，点击「新建对话」开始');
       return;
     }
-    setHistoryTip('共 ' + conversations.length + ' 个对话 · 仅自己可见');
 
-    conversations.forEach(function (conv) {
+    var visible = conversations.filter(matchesSearch);
+    var kwNow = chatSearchKeyword();
+    if (!visible.length) {
+      setHistoryTip('没有匹配「' + String(chatSearchInput.value || '').trim() + '」的对话');
+      return;
+    }
+    setHistoryTip(kwNow
+      ? '找到 ' + visible.length + ' 个匹配的对话'
+      : '共 ' + conversations.length + ' 个对话 · 仅自己可见');
+
+    visible.forEach(function (conv) {
       var li = document.createElement('li');
       li.className = 'history-row';
 
@@ -342,9 +365,10 @@
   }
 
   /** 打开某个会话并加载历史消息 */
-  async function selectConversation(id) {
+  async function selectConversation(id, opts) {
+    var force = Boolean(opts && opts.force);
     if (isSending) return;             // 生成中不切换，避免流式内容写进气泡错误
-    if (id === currentConversationId && messageList.childElementCount > 0) {
+    if (!force && id === currentConversationId && messageList.childElementCount > 0) {
       if (isNarrow()) closeSidebar();
       return;
     }
@@ -366,7 +390,7 @@
     currentConversationId = id;
     clearChildren(messageList);
     (Array.isArray(r.data.messages) ? r.data.messages : []).forEach(function (m) {
-      appendMessage(m.role === 'user' ? 'user' : 'ai', m.content, m.attachments);
+      appendMessage(m.role === 'user' ? 'user' : 'ai', m.content, m.attachments, { id: m.id, model: m.model });
     });
     renderConversations();
     updateWelcomeVisibility();
@@ -380,6 +404,38 @@
   function closeConvMenu() {
     if (openMenuEl && openMenuEl.parentNode) openMenuEl.parentNode.removeChild(openMenuEl);
     openMenuEl = null;
+  }
+
+  /** 导出会话为 Markdown 文件（Open WebUI 的导出能力） */
+  async function exportConversation(conv) {
+    var r = await fetchJson(API_CONVERSATIONS + '/' + conv.id + '/messages', { headers: JSON_HEADERS });
+    if (r.status === 401) return handleSessionExpired();
+    if (!r.ok || !r.data || !Array.isArray(r.data.messages)) {
+      setHistoryTip('导出失败，请稍后重试');
+      return;
+    }
+    var lines = ['# ' + (conv.title || DEFAULT_TITLE), ''];
+    r.data.messages.forEach(function (m) {
+      lines.push('## ' + (m.role === 'user' ? '我' : ('AI' + (m.model ? '（' + m.model + '）' : ''))));
+      lines.push('');
+      lines.push(String(m.content || ''));
+      if (Array.isArray(m.attachments) && m.attachments.length) {
+        lines.push('');
+        lines.push('附件：' + m.attachments.map(function (a) { return a.filename; }).join('、'));
+      }
+      lines.push('');
+    });
+
+    var blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = String(conv.title || DEFAULT_TITLE).replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) + '.md';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+    setHistoryTip('已导出「' + (conv.title || DEFAULT_TITLE) + '」');
   }
 
   function openConvMenu(anchorBtn) {
@@ -410,7 +466,17 @@
       deleteConversation(conv);
     });
 
+    var exportBtn = createEl('button', 'conv-menu-item', '导出 Markdown');
+    exportBtn.type = 'button';
+    exportBtn.setAttribute('role', 'menuitem');
+    exportBtn.addEventListener('click', function (event) {
+      event.stopPropagation();
+      closeConvMenu();
+      exportConversation(conv);
+    });
+
     menu.appendChild(renameBtn);
+    menu.appendChild(exportBtn);
     menu.appendChild(deleteBtn);
     document.body.appendChild(menu);
 
@@ -479,9 +545,11 @@
    * @param {string} text
    * @returns {{root: HTMLElement, textEl: HTMLElement}}
    */
-  function appendMessage(role, text, attachments) {
+  function appendMessage(role, text, attachments, meta) {
+    var info = meta || {};
     var isUser = role === 'user';
     var root = createEl('div', 'msg ' + (isUser ? 'msg-user' : 'msg-ai'));
+    if (info.id) root.dataset.messageId = String(info.id);
 
     if (!isUser) {
       var avatar = createEl('span', 'msg-avatar', 'AI');
@@ -490,7 +558,12 @@
     }
 
     var body = createEl('div', 'msg-body');
-    if (!isUser) body.appendChild(createEl('span', 'msg-role', 'AI'));
+    if (!isUser) {
+      var roleEl = createEl('span', 'msg-role', 'AI');
+      // 回答下方的模型标签（类似 Open WebUI 显示由哪个模型回答）
+      if (info.model) roleEl.appendChild(createEl('span', 'msg-model-tag', info.model));
+      body.appendChild(roleEl);
+    }
 
     // 附件随消息展示（用户气泡）：图片缩略图 + 文件名，点击开预览
     if (isUser && Array.isArray(attachments) && attachments.length) {
@@ -503,9 +576,11 @@
       textEl.textContent = text === undefined || text === null ? '' : String(text);
     } else {
       renderMarkdown(textEl, text);
+      enhanceCodeBlocks(textEl);
     }
 
     body.appendChild(textEl);
+    body.appendChild(buildMsgActions(isUser));
     root.appendChild(body);
     messageList.appendChild(root);
 
@@ -513,6 +588,68 @@
     scrollToBottom();
 
     return { root: root, textEl: textEl };
+  }
+
+  /** 消息操作条：用户消息 = 复制/编辑/删除；AI 消息 = 复制/重新生成/删除 */
+  function buildMsgActions(isUser) {
+    var bar = createEl('div', 'msg-actions');
+    var acts = isUser
+      ? [['copy', '复制'], ['edit', '编辑'], ['delete', '删除', 'is-danger']]
+      : [['copy', '复制'], ['regen', '重新生成'], ['delete', '删除', 'is-danger']];
+    acts.forEach(function (a) {
+      var btn = createEl('button', 'msg-action' + (a[2] ? ' ' + a[2] : ''), a[1]);
+      btn.type = 'button';
+      btn.dataset.act = a[0];
+      btn.title = a[1];
+      bar.appendChild(btn);
+    });
+    return bar;
+  }
+
+  /** 给 Markdown 代码块加「复制」按钮（Open WebUI 同款交互） */
+  function enhanceCodeBlocks(container) {
+    if (!container) return;
+    Array.prototype.forEach.call(container.querySelectorAll('pre'), function (pre) {
+      if (pre.querySelector('.code-copy')) return;
+      var btn = createEl('button', 'code-copy', '复制');
+      btn.type = 'button';
+      btn.addEventListener('click', function () {
+        var codeEl = pre.querySelector('code') || pre;
+        var codeText = codeEl ? codeEl.textContent : '';
+        copyText(codeText).then(function () {
+          btn.textContent = '已复制';
+          btn.classList.add('is-done');
+          window.setTimeout(function () {
+            btn.textContent = '复制';
+            btn.classList.remove('is-done');
+          }, 1600);
+        });
+      });
+      pre.appendChild(btn);
+    });
+  }
+
+  /** 复制文本到剪贴板（兼容 http / 旧浏览器） */
+  function copyText(text) {
+    var value = String(text || '');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(value).catch(function () { return legacyCopy(value); });
+    }
+    return Promise.resolve(legacyCopy(value));
+  }
+
+  function legacyCopy(value) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e) { /* 忽略 */ }
+    return undefined;
   }
 
   /** 消息气泡里的附件列表（只读，无删除按钮；点击开预览） */
@@ -624,6 +761,8 @@
    * @param {string} [presetText] 传入时忽略输入框内容（快捷卡片使用）
    */
   async function sendMessage(presetText) {
+    // 生成中再点发送 = 停止生成（Open WebUI 同款交互）
+    if (activeStream) { activeStream.controller.abort(); return; }
     if (isSending) return;               // 防止重复发送
     if (!currentUser) { flashLoginHint(); return; }
 
@@ -644,7 +783,7 @@
 
     // 1. 立即显示用户消息（连同待发附件一起进气泡），并清空输入框
     var sentAttachments = currentAttachments.slice();
-    appendMessage('user', text, sentAttachments);
+    var userParts = appendMessage('user', text, sentAttachments, {});
     if (!fromPreset) {
       messageInput.value = '';
       autoResize();
@@ -655,7 +794,7 @@
 
     // 3. 连接流式接口，逐段渲染
     try {
-      await streamReply(convId, text, parts);
+      await streamReply(convId, text, parts, { userRoot: userParts.root });
     } finally {
       isSending = false;
       refreshSendButton();
@@ -671,19 +810,37 @@
    * 调用 POST /api/conversations/:id/chat/stream 并按 SSE 增量渲染。
    * 后端只在流结束后一次性写库，前端同样只在内存里累积。
    */
-  async function streamReply(convId, text, parts) {
+  async function streamReply(convId, text, parts, options) {
+    var opts = options || {};
     streamBuffer = '';
     streamTarget = parts.textEl;
+
+    // 请求体：regenerate 模式不带 message；始终带上当前选择的模型（服务端会做白名单校验）
+    var payload = opts.regenerate ? { regenerate: true } : { message: text, search: webSearchOn };
+    if (selectedModel) payload.model = selectedModel;
+
+    var controller = (typeof AbortController === 'function') ? new AbortController() : null;
+    activeStream = controller ? { controller: controller } : null;
+    refreshSendButton();
 
     var res;
     try {
       res = await fetch(API_CONVERSATIONS + '/' + convId + '/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ message: text, search: webSearchOn })
+        body: JSON.stringify(payload),
+        signal: controller ? controller.signal : undefined
       });
     } catch (networkError) {
+      activeStream = null;
+      refreshSendButton();
       flushStreamRender();
+      if (networkError && networkError.name === 'AbortError') {
+        // 用户点「停止生成」：后端检测到客户端断开后不会保存半截回答
+        parts.root.parentNode && parts.root.parentNode.removeChild(parts.root);
+        updateWelcomeVisibility();
+        return;
+      }
       failAssistant(parts, NETWORK_ERROR_TEXT);
       setBackendState(false);
       return;
@@ -739,21 +896,44 @@
             scheduleStreamRender();
           } else if (evt.type === 'error') {
             errorMessage = evt.message || STREAM_ERROR_TEXT;
-          } else if (evt.type === 'done' && typeof evt.fullText === 'string' && evt.fullText) {
+          } else if (evt.type === 'done') {
             // browser 对话模式：增量是纯文本伪流式，最终排版以 done 携带的 Markdown 全文为准
-            finalFullText = evt.fullText;
+            if (typeof evt.fullText === 'string' && evt.fullText) finalFullText = evt.fullText;
+            if (evt.messageId) parts.root.dataset.messageId = String(evt.messageId);
+            if (evt.model) {
+              var roleEl = parts.root.querySelector('.msg-role');
+              if (roleEl && !roleEl.querySelector('.msg-model-tag')) {
+                roleEl.appendChild(createEl('span', 'msg-model-tag', evt.model));
+              }
+            }
+          } else if (evt.type === 'start') {
+            // 记录用户消息 id（编辑 / 删除需要）
+            if (evt.userMessageId && opts.userRoot) opts.userRoot.dataset.messageId = String(evt.userMessageId);
           }
-          // type=start 仅作流程标记，无需额外处理
         }
       }
     } catch (streamError) {
+      if (streamError && streamError.name === 'AbortError') {
+        // 用户点了「停止生成」：丢弃半截内容（服务端检测到断连也不会落库）
+        activeStream = null;
+        refreshSendButton();
+        streamTarget = null;
+        streamBuffer = '';
+        if (parts.root.parentNode) parts.root.parentNode.removeChild(parts.root);
+        updateWelcomeVisibility();
+        return;
+      }
       console.warn('[组内 AI] 流式接收中断：', streamError);
       errorMessage = errorMessage || STREAM_ERROR_TEXT;
     }
 
+    activeStream = null;
+    refreshSendButton();
+
     parts.root.classList.remove('is-streaming');
     if (finalFullText) streamBuffer = finalFullText; // 用 Markdown 全文替换纯文本累积
     flushStreamRender();
+    enhanceCodeBlocks(parts.textEl);
 
     if (errorMessage) {
       // 失败时后端不会保存半截 assistant 消息，前端同样只显示错误提示
@@ -765,6 +945,128 @@
       return;
     }
     setBackendState(true);
+  }
+
+  /* ========================= 消息操作（Open WebUI 风格） ========================= */
+
+  /** 找到消息根节点（从操作按钮向上找 .msg） */
+  function msgRootOf(el) {
+    while (el && el !== messageList) {
+      if (el.classList && el.classList.contains('msg')) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  /** 是否是该会话最后一条消息（重新生成只支持最后一条 AI 回答） */
+  function isLastMessage(root) {
+    var msgs = messageList.querySelectorAll('.msg');
+    return msgs.length > 0 && msgs[msgs.length - 1] === root;
+  }
+
+  async function handleMsgAction(act, root) {
+    var textEl = root.querySelector('.msg-text');
+    var isUser = root.classList.contains('msg-user');
+    var messageId = Number(root.dataset.messageId) || null;
+
+    if (act === 'copy') {
+      await copyText(textEl ? textEl.innerText : '');
+      return;
+    }
+
+    if (act === 'regen') {
+      if (!isLastMessage(root)) { setHistoryTip('只能重新生成最后一条回答'); return; }
+      await regenerateLastAnswer();
+      return;
+    }
+
+    if (act === 'edit') {
+      if (!isUser || !messageId) return;
+      startEditMessage(root, messageId, textEl);
+      return;
+    }
+
+    if (act === 'delete') {
+      if (!messageId) return;
+      var ok = window.confirm(isUser
+        ? '删除这条消息及其之后的全部对话？此操作不可撤销。'
+        : '删除这条回答及其之后的全部对话？此操作不可撤销。');
+      if (!ok) return;
+      var r = await fetchJson(API_CONVERSATIONS + '/' + currentConversationId + '/messages/' + messageId, {
+        method: 'DELETE', headers: JSON_HEADERS
+      });
+      if (r.status === 401) return handleSessionExpired();
+      if (!r.ok) { setHistoryTip('删除失败，请重试'); return; }
+      await selectConversation(currentConversationId, { force: true });
+      return;
+    }
+  }
+
+  /** 行内编辑用户消息：保存后自动重新生成回答 */
+  function startEditMessage(root, messageId, textEl) {
+    if (root.querySelector('.msg-edit-box')) return;
+    var original = textEl ? textEl.innerText : '';
+    var box = createEl('div', 'msg-edit-box');
+    var input = createEl('textarea', 'msg-edit-input');
+    input.value = original;
+    var row = createEl('div', 'msg-edit-actions');
+    var cancel = createEl('button', 'msg-edit-btn', '取消');
+    cancel.type = 'button';
+    var save = createEl('button', 'msg-edit-btn is-primary', '保存并重新生成');
+    save.type = 'button';
+    row.appendChild(cancel);
+    row.appendChild(save);
+    box.appendChild(input);
+    box.appendChild(row);
+
+    var body = root.querySelector('.msg-body');
+    var actionBar = root.querySelector('.msg-actions');
+    if (!body) return;
+    body.insertBefore(box, actionBar || null);
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+
+    cancel.addEventListener('click', function () { box.remove(); });
+    save.addEventListener('click', async function () {
+      var content = input.value.trim();
+      if (!content) { input.focus(); return; }
+      save.disabled = true;
+      save.textContent = '保存中…';
+      var r = await fetchJson(API_CONVERSATIONS + '/' + currentConversationId + '/messages/' + messageId, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ content: content })
+      });
+      if (r.status === 401) return handleSessionExpired();
+      if (!r.ok) {
+        save.disabled = false;
+        save.textContent = '保存并重新生成';
+        setHistoryTip((r.data && r.data.message) || '保存失败，请重试');
+        return;
+      }
+      // 服务端已删除该消息之后的全部内容：重新拉取后触发重答
+      await selectConversation(currentConversationId, { force: true });
+      await regenerateLastAnswer();
+    });
+  }
+
+  /** 重新生成最后一条回答：清掉最后的 AI 气泡，重发流式请求（regenerate=true） */
+  async function regenerateLastAnswer() {
+    if (isSending) return;
+    var msgs = Array.prototype.slice.call(messageList.querySelectorAll('.msg'));
+    var lastAi = msgs.length ? msgs[msgs.length - 1] : null;
+    if (lastAi && lastAi.classList.contains('msg-ai')) {
+      lastAi.parentNode.removeChild(lastAi);
+    }
+    var parts = appendAssistantPlaceholder();
+    isSending = true;
+    refreshSendButton();
+    try {
+      await streamReply(currentConversationId, null, parts, { regenerate: true });
+    } finally {
+      isSending = false;
+      refreshSendButton();
+    }
   }
 
   /* ========================= 输入框 ========================= */
@@ -779,7 +1081,19 @@
 
   /** 未登录 / 内容为空 / 正在生成时，禁用发送按钮 */
   function refreshSendButton() {
-    sendBtn.disabled = isSending || !currentUser || messageInput.value.trim() === '';
+    var streaming = Boolean(activeStream);
+    // 生成中：按钮变「停止」，任何情况下都可点；否则按常规禁用规则
+    sendBtn.disabled = streaming ? false : (isSending || isUploading || !currentUser || messageInput.value.trim() === '');
+    sendBtn.classList.toggle('is-stop', streaming);
+    var wantIcon = streaming ? 'stop' : 'send';
+    if (sendBtn.dataset.icon !== wantIcon) {
+      sendBtn.dataset.icon = wantIcon;
+      sendBtn.innerHTML = streaming
+        ? '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
+    }
+    sendBtn.title = streaming ? '停止生成' : (isUploading ? '附件上传中，请稍候…' : '');
+    sendBtn.setAttribute('aria-label', streaming ? '停止生成' : '发送消息');
   }
 
   /** 根据登录态切换输入区可用性 */
@@ -795,13 +1109,124 @@
 
   /** 未登录时点击快捷卡片：提示去登录，而不是静默无反应 */
   function flashLoginHint() {
-    if (userStatus) userStatus.textContent = '请先使用飞书登录';
+    if (userStatus) userStatus.textContent = '请先登录';
     var link = authArea.querySelector('.btn-feishu-login');
     if (!link) return;
     link.classList.remove('pulse');
     void link.offsetWidth; // 强制重排，让动画可以重复触发
     link.classList.add('pulse');
     window.setTimeout(function () { link.classList.remove('pulse'); }, 1400);
+  }
+
+  /* ========================= 模型选择器 ========================= */
+
+  var MODEL_KEY = 'feishu_ai_model';
+
+  function readSavedModel() {
+    try { return localStorage.getItem(MODEL_KEY) || ''; } catch (e) { return ''; }
+  }
+  function saveModel(name) {
+    try { localStorage.setItem(MODEL_KEY, name); } catch (e) { /* 忽略 */ }
+  }
+
+  /** 渲染模型下拉菜单（当前项高亮） */
+  function renderModelMenu() {
+    if (!modelMenu) return;
+    clearChildren(modelMenu);
+    availableModels.forEach(function (name) {
+      var item = createEl('button', 'model-menu-item' + (name === selectedModel ? ' is-active' : ''), name);
+      item.type = 'button';
+      item.dataset.model = name;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', name === selectedModel ? 'true' : 'false');
+      if (name === selectedModel) item.appendChild(createEl('span', 'check', '✓'));
+      modelMenu.appendChild(item);
+    });
+  }
+
+  function closeModelMenu() {
+    if (!modelMenu) return;
+    modelMenu.hidden = true;
+    if (modelChip) modelChip.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleModelMenu() {
+    if (!modelMenu || availableModels.length < 2) return; // 只有一个模型时无需选择
+    modelMenu.hidden = !modelMenu.hidden;
+    modelChip.setAttribute('aria-expanded', modelMenu.hidden ? 'false' : 'true');
+  }
+
+  /** 选择模型：持久化 + 更新 chip + 关菜单 */
+  function chooseModel(name) {
+    if (availableModels.indexOf(name) === -1) return;
+    selectedModel = name;
+    saveModel(name);
+    if (modelChipText) modelChipText.textContent = name;
+    renderModelMenu();
+    closeModelMenu();
+  }
+
+  /** 启动时拉取可选模型：校验本机保存的选择是否仍在白名单里 */
+  async function loadModels(fallbackModel) {
+    var saved = readSavedModel();
+    try {
+      var r = await fetchJson('/api/models', { headers: JSON_HEADERS });
+      if (r.ok && r.data && Array.isArray(r.data.models)) availableModels = r.data.models;
+    } catch (e) { /* 忽略：退化为单模型 */ }
+    if (!availableModels.length && fallbackModel) availableModels = [fallbackModel];
+
+    if (saved && availableModels.indexOf(saved) > -1) selectedModel = saved;
+    else selectedModel = (fallbackModel && availableModels.indexOf(fallbackModel) > -1)
+      ? fallbackModel
+      : (availableModels[0] || '');
+
+    if (modelChipText) modelChipText.textContent = selectedModel || 'AI 已接入 · 流式输出';
+    renderModelMenu();
+  }
+
+  /* ========================= 主题（深色 / 浅色） ========================= */
+
+  var THEME_KEY = 'feishu_ai_theme';
+
+  /** 初始主题：用户显式选择 > 系统偏好 > 浅色 */
+  function applyTheme(theme) {
+    if (theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  }
+
+  function initTheme() {
+    var saved = null;
+    try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* 隐私模式忽略 */ }
+    if (saved === 'dark' || saved === 'light') { applyTheme(saved); return; }
+    var preferDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(preferDark ? 'dark' : 'light');
+  }
+
+  function toggleTheme() {
+    var next = currentTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* 忽略 */ }
+  }
+
+  initTheme();
+
+  /* ========================= 会话搜索（前端过滤） ========================= */
+
+  function chatSearchKeyword() {
+    return chatSearchInput ? String(chatSearchInput.value || '').trim().toLowerCase() : '';
+  }
+
+  function matchesSearch(conv) {
+    var kw = chatSearchKeyword();
+    if (!kw) return true;
+    return String(conv.title || '').toLowerCase().indexOf(kw) > -1;
   }
 
   /* ========================= 后端状态 ========================= */
@@ -826,8 +1251,9 @@
       return;
     }
     if (r.data.aiReady) {
-      modelChipText.textContent = 'AI 已接入 · 流式输出';
       if (modelChip) modelChip.classList.add('ready');
+      // 拉取可选模型列表并渲染选择器；chip 显示当前模型名
+      await loadModels(r.data.model || '');
     } else {
       modelChipText.textContent = '未配置 AI 模型';
       if (modelChip) modelChip.classList.remove('ready');
@@ -864,16 +1290,12 @@
     sidebarUserName.textContent = user ? user.name : '当前用户';
   }
 
-  /** 未登录：右上角显示「使用飞书登录」按钮 */
+  /** 未登录：主区域显示本地账号 登录/注册 面板，右上角清空 */
   function renderLoggedOut(hint) {
     clearChildren(authArea);
-    var link = createEl('a', 'btn-feishu-login', '使用飞书登录');
-    link.href = '/auth/feishu';
-    link.title = '通过飞书 OAuth 登录以识别组内成员';
-    authArea.appendChild(link);
-
+    if (authPanel) authPanel.hidden = false;
     renderSidebarUser(null);
-    userStatus.textContent = hint || '未登录飞书';
+    userStatus.textContent = hint || '未登录';
     logoutBtn.hidden = true;
   }
 
@@ -883,25 +1305,13 @@
     var chip = createEl('span', 'current-user');
     chip.appendChild(buildAvatarNode(user));
     chip.appendChild(createEl('span', 'current-user-name', user.name || '飞书用户'));
-    chip.title = '飞书 ID：' + (user.feishuUserId || '');
+    chip.title = '账号：' + (user.userId || user.name || '');
     authArea.appendChild(chip);
 
+    if (authPanel) authPanel.hidden = true;
     renderSidebarUser(user);
-    userStatus.textContent = '已登录飞书';
+    userStatus.textContent = '已登录';
     logoutBtn.hidden = false;
-  }
-
-  /** 读取并清理 URL 上的登录结果提示（?login=denied / ?login=error） */
-  function consumeLoginHint() {
-    var params = new URLSearchParams(window.location.search);
-    var flag = params.get('login');
-    if (!flag) return '';
-    params.delete('login');
-    var rest = params.toString();
-    window.history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : ''));
-    if (flag === 'denied') return '已取消授权，未登录';
-    if (flag === 'error') return '登录失败，请重试';
-    return '';
   }
 
   /** 会话过期 / 在别处登出：清空本地状态，回到未登录界面 */
@@ -915,7 +1325,7 @@
 
   /** 页面加载时获取当前登录态：GET /api/me */
   async function loadMe() {
-    var hint = consumeLoginHint();
+    var hint = '';
     var r = await fetchJson(API_ME, { headers: JSON_HEADERS });
 
     if (r.status === 0) {
@@ -940,6 +1350,44 @@
     await refreshConversations();
     refreshAttachments();
     if (!isNarrow()) messageInput.focus();
+  }
+
+  /* ========================= 本地账号 登录/注册 ========================= */
+
+  var authMode = 'login';
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    authTabLogin.classList.toggle('is-active', mode === 'login');
+    authTabRegister.classList.toggle('is-active', mode === 'register');
+    authSubmit.textContent = mode === 'login' ? '登 录' : '注册并登录';
+    authPassword.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    authError.textContent = '';
+  }
+
+  async function submitAuth() {
+    var username = authUsername.value.trim();
+    var password = authPassword.value;
+    if (!username || !password) { authError.textContent = '请填写用户名和密码'; return; }
+    authSubmit.disabled = true;
+    authError.textContent = '';
+    try {
+      var r = await fetchJson(authMode === 'login' ? '/auth/login' : '/auth/register', {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ username: username, password: password })
+      });
+      if (r.ok && r.data && r.data.success === true) {
+        authPassword.value = '';
+        await loadMe();
+        return;
+      }
+      authError.textContent = (r.data && r.data.message) || '操作失败，请重试';
+    } catch (err) {
+      authError.textContent = '网络错误，请重试';
+    } finally {
+      authSubmit.disabled = false;
+    }
   }
 
   /** 退出登录：清除服务端 session，界面回到未登录 */
@@ -1036,21 +1484,28 @@
     }
 
     var files = Array.prototype.slice.call(fileList);
-    for (var i = 0; i < files.length; i++) {
-      var form = new FormData();
-      form.append('file', files[i]);
-      setHistoryTip('正在上传 ' + files[i].name + ' …');
-      var r = await fetchJson('/api/conversations/' + convId + '/uploads', { method: 'POST', body: form });
-      if (r.status === 401) { handleSessionExpired(); return; }
-      if (!r.ok || !r.data || r.data.success !== true) {
-        window.alert((r.data && r.data.message) || ('上传失败：' + files[i].name));
+    isUploading = true;
+    refreshSendButton();
+    try {
+      for (var i = 0; i < files.length; i++) {
+        var form = new FormData();
+        form.append('file', files[i]);
+        setHistoryTip('正在上传 ' + files[i].name + ' …');
+        var r = await fetchJson('/api/conversations/' + convId + '/uploads', { method: 'POST', body: form });
+        if (r.status === 401) { handleSessionExpired(); return; }
+        if (!r.ok || !r.data || r.data.success !== true) {
+          window.alert((r.data && r.data.message) || ('上传失败：' + files[i].name));
+        }
       }
+      currentConversationId = convId;
+      setHistoryTip('');
+      await refreshAttachments();
+      refreshConversations();
+    } finally {
+      // 无论成功 / 失败 / 会话过期：都要解除「上传中」锁定，否则发送按钮会一直禁用
+      isUploading = false;
+      refreshSendButton();
     }
-
-    currentConversationId = convId;
-    setHistoryTip('');
-    await refreshAttachments();
-    refreshConversations();
   }
 
   async function deleteAttachment(id) {
@@ -1197,6 +1652,7 @@
     messageInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
+        if (activeStream) return; // 生成中：Enter 不打断（要停请点「停止」按钮）
         sendMessage();
       }
     });
@@ -1206,6 +1662,44 @@
 
     // 退出登录
     logoutBtn.addEventListener('click', logout);
+    if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
+    if (chatSearchInput) {
+      chatSearchInput.addEventListener('input', function () { renderConversations(); });
+    }
+
+    // 消息操作条（事件委托，避免给每条消息单独绑定）
+    messageList.addEventListener('click', function (event) {
+      var btn = event.target.closest('.msg-action');
+      if (!btn) return;
+      var root = msgRootOf(btn);
+      if (!root) return;
+      handleMsgAction(btn.dataset.act, root);
+    });
+
+    // 模型选择器
+    if (modelChip) modelChip.addEventListener('click', function (event) {
+      event.stopPropagation();
+      toggleModelMenu();
+    });
+    if (modelMenu) {
+      modelMenu.addEventListener('click', function (event) {
+        var item = event.target.closest('.model-menu-item');
+        if (!item) return;
+        chooseModel(item.dataset.model);
+      });
+    }
+    document.addEventListener('click', function (event) {
+      if (!modelMenu || modelMenu.hidden) return;
+      if (event.target.closest('.model-picker')) return;
+      closeModelMenu();
+    });
+
+    // 本地账号登录/注册
+    authTabLogin.addEventListener('click', function () { setAuthMode('login'); });
+    authTabRegister.addEventListener('click', function () { setAuthMode('register'); });
+    authSubmit.addEventListener('click', submitAuth);
+    authPassword.addEventListener('keydown', function (e) { if (e.key === 'Enter') submitAuth(); });
+    authUsername.addEventListener('keydown', function (e) { if (e.key === 'Enter') authPassword.focus(); });
 
     // 侧边栏开关
     menuBtn.addEventListener('click', toggleSidebar);

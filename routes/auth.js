@@ -1,253 +1,175 @@
 /**
- * 飞书登录路由（routes/auth.js）
+ * 本地账号认证路由：routes/auth.js
  * -------------------------------------------------------------
- * 第三阶段已实现并通过测试的飞书 Web OAuth 授权码登录，第四阶段「原样迁移」到本路由，
- * 唯一新增：登录成功后把用户同步进 SQLite，并把数据库内部 user.id 写入 session。
- *
- *   GET  /auth/feishu           跳转飞书官方授权页
- *   GET  /auth/feishu/callback  接收 code，服务端换取 user_access_token 并拉取用户身份
- *   GET  /api/me                返回当前登录用户（未登录 401）
- *   POST /auth/logout           清除 session
- *
- * 接口依据（2026-09 核对的飞书开放平台官方文档）：
- *   授权页   GET  https://accounts.feishu.cn/open-apis/authen/v1/authorize
- *   换令牌   POST https://accounts.feishu.cn/oauth/v3/token        （v2 已标记历史版本）
- *   用户信息 GET  https://open.feishu.cn/open-apis/authen/v1/user_info
+ * 2026-09-24 起替代飞书 OAuth：
+ *   POST /auth/register  注册（用户名 + 密码，scrypt 加盐哈希存储）
+ *   POST /auth/login     登录（session 写入服务端确认的用户）
+ *   POST /auth/logout    登出（销毁 session）
+ *   GET  /api/me         当前登录用户（未登录 401）
  *
  * 安全约定：
- *   - App Secret 只存在于服务端环境变量，绝不下发前端、绝不写进 public/
- *   - 用户身份一律由后端拿飞书认证结果写入 session，绝不信任浏览器提交的 user_id
- *   - 授权流程带 state 防 CSRF，校验后立即作废
+ *   - 密码用 node:crypto 的 scrypt 加盐哈希（N=16384），绝不存明文、绝不回传
+ *   - 登录失败次数按 IP 限流（10 次锁定 10 分钟）；注册按 IP 限流（每小时 10 个）
+ *   - 用户身份一律由服务端 session 决定，绝不信任浏览器提交的 user_id
  */
 
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { upsertFeishuUser } from '../database/db.js';
-
-/* ========================= 飞书 OAuth 配置 ========================= */
-
-// 飞书官方端点（当前版本，勿改回旧地址）
-const FEISHU_ACCOUNTS_ORIGIN = 'https://accounts.feishu.cn';
-const FEISHU_OPENAPI_ORIGIN = 'https://open.feishu.cn';
-const FEISHU_AUTHORIZE_PATH = '/open-apis/authen/v1/authorize';
-const FEISHU_TOKEN_PATH = '/oauth/v3/token';
-const FEISHU_USER_INFO_PATH = '/open-apis/authen/v1/user_info';
-
-/** session cookie 名（server.js 的 session 配置与本文件 clearCookie 必须一致） */
-export const SESSION_COOKIE_NAME = 'feishu_ai_sid';
-
-/** 读取飞书应用配置（全部来自环境变量，禁止硬编码） */
-export function getFeishuConfig() {
-  const baseUrl = String(process.env.BASE_URL || '').replace(/\/+$/, '');
-  return {
-    appId: String(process.env.FEISHU_APP_ID || ''),
-    appSecret: String(process.env.FEISHU_APP_SECRET || ''),
-    redirectUri: String(process.env.FEISHU_REDIRECT_URI || (baseUrl ? baseUrl + '/auth/feishu/callback' : ''))
-  };
-}
-
-export function isFeishuConfigured() {
-  const cfg = getFeishuConfig();
-  return Boolean(cfg.appId && cfg.appSecret && cfg.redirectUri);
-}
-
-/** 打码显示 App ID，方便启动时确认配置又不泄露完整凭证 */
-export function maskSecret(value) {
-  if (!value) return '';
-  if (value.length <= 8) return value.slice(0, 2) + '****';
-  return value.slice(0, 6) + '****' + value.slice(-4);
-}
+import { getUserByUsername, createLocalUser } from '../database/db.js';
 
 const router = Router();
 
-/* ========================= 飞书登录 ========================= */
+export const SESSION_COOKIE_NAME = 'feishu_ai_sid';
 
-/**
- * GET /auth/feishu
- * 开始飞书登录：生成 state 存入 session，然后 302 到飞书官方授权页。
- */
-router.get('/auth/feishu', (req, res) => {
-  const cfg = getFeishuConfig();
+const USERNAME_RE = /^[\w\u4e00-\u9fa5-]{2,32}$/;
+const PASSWORD_MIN = 6;
+const PASSWORD_MAX = 128;
+const SCRYPT_N = 16384;
 
-  if (!cfg.appId || !cfg.appSecret || !cfg.redirectUri) {
-    return res.status(503).json({
-      success: false,
-      message: '飞书登录未配置：请在 .env 中填写 FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_REDIRECT_URI 后重启服务'
-    });
+/* ----------------------------- 密码哈希 ----------------------------- */
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64, { N: SCRYPT_N }).toString('hex');
+  return 'scrypt:' + SCRYPT_N + ':' + salt + ':' + hash;
+}
+
+function verifyPassword(password, stored) {
+  const parts = String(stored || '').split(':');
+  if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
+  const n = Number(parts[1]);
+  const salt = parts[2];
+  const expect = Buffer.from(parts[3], 'hex');
+  const actual = crypto.scryptSync(String(password), salt, expect.length, { N: n });
+  return crypto.timingSafeEqual(actual, expect);
+}
+
+/* ----------------------------- 简单限流（内存版，重启清零） ----------------------------- */
+
+const loginFails = new Map();   // ip -> { count, lockedUntil }
+const registerHits = new Map(); // ip -> number[]（时间戳）
+
+function clientIp(req) {
+  return String(req.ip || 'unknown');
+}
+
+function loginLocked(req) {
+  const rec = loginFails.get(clientIp(req));
+  return Boolean(rec && rec.lockedUntil && rec.lockedUntil > Date.now());
+}
+function noteLoginFail(req) {
+  const ip = clientIp(req);
+  const rec = loginFails.get(ip) || { count: 0, lockedUntil: 0 };
+  rec.count++;
+  if (rec.count >= 10) { rec.lockedUntil = Date.now() + 10 * 60 * 1000; rec.count = 0; }
+  loginFails.set(ip, rec);
+}
+function clearLoginFail(req) { loginFails.delete(clientIp(req)); }
+
+function registerAllowed(req) {
+  const ip = clientIp(req);
+  const now = Date.now();
+  const list = (registerHits.get(ip) || []).filter(function (t) { return now - t < 3600000; });
+  if (list.length >= 10) { registerHits.set(ip, list); return false; }
+  list.push(now);
+  registerHits.set(ip, list);
+  return true;
+}
+
+/* ----------------------------- 小工具 ----------------------------- */
+
+function publicUser(user) {
+  return { name: user.name, avatar: user.avatar || '', userId: user.username || '' };
+}
+
+function attachSession(req, user) {
+  req.session.user = {
+    id: user.id,
+    feishuUserId: user.feishu_user_id, // 兼容旧字段（本地账号为 local:<username>）
+    username: user.username || '',     // 干净的登录名（展示用）
+    name: user.name,
+    avatar: user.avatar || ''
+  };
+}
+
+function readCredentials(req, res) {
+  const body = req.body || {};
+  const username = typeof body.username === 'string' ? body.username.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!USERNAME_RE.test(username)) {
+    res.status(400).json({ success: false, message: '用户名需为 2~32 位字母/数字/中文/下划线' });
+    return null;
   }
+  if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+    res.status(400).json({ success: false, message: '密码长度需为 ' + PASSWORD_MIN + '~' + PASSWORD_MAX + ' 位' });
+    return null;
+  }
+  return { username: username, password: password };
+}
 
-  // state 防 CSRF：随机串存 session，回调时比对后立即销毁
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.oauthState = state;
+/* ----------------------------- 路由 ----------------------------- */
 
-  // 使用 URL 标准库拼接，保证 redirect_uri 等参数编码正确
-  const authorizeUrl = new URL(FEISHU_AUTHORIZE_PATH, FEISHU_ACCOUNTS_ORIGIN);
-  authorizeUrl.searchParams.set('client_id', cfg.appId);
-  authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('redirect_uri', cfg.redirectUri);
-  authorizeUrl.searchParams.set('state', state);
-
-  // 先落盘 session（写入 state 与 cookie），再跳转
-  req.session.save((err) => {
-    if (err) {
-      console.error('[飞书登录] 保存 session 失败：', err);
-      return res.status(500).json({ success: false, message: '服务器内部错误' });
-    }
-    return res.redirect(authorizeUrl.toString());
-  });
-});
-
-/**
- * GET /auth/feishu/callback
- * 飞书授权后回调：
- *   1. 处理用户拒绝授权（error=access_denied）
- *   2. 校验 state（防 CSRF）
- *   3. 服务端用 code 换 user_access_token（v3 令牌端点）
- *   4. 用 user_access_token 拉取用户身份（open_id 等）
- *   5. 同步进 SQLite（users 表），把内部 user.id 写入 session，再回首页
- */
-router.get('/auth/feishu/callback', async (req, res) => {
-  const backHome = (query) => res.redirect('/' + (query || ''));
-
+/** 注册 */
+router.post('/auth/register', (req, res) => {
+  if (!registerAllowed(req)) {
+    return res.status(429).json({ success: false, message: '注册过于频繁，请一小时后再试' });
+  }
+  const cred = readCredentials(req, res);
+  if (!cred) return undefined;
+  if (getUserByUsername(cred.username)) {
+    return res.status(409).json({ success: false, message: '该用户名已被注册' });
+  }
+  let user;
   try {
-    const code = typeof req.query.code === 'string' ? req.query.code : '';
-    const state = typeof req.query.state === 'string' ? req.query.state : '';
-    const error = typeof req.query.error === 'string' ? req.query.error : '';
-
-    // 用户在授权页点了拒绝
-    if (error) {
-      console.warn('[飞书登录] 用户拒绝授权或授权页返回错误：', error);
-      return backHome('?login=denied');
-    }
-
-    if (!code) {
-      console.warn('[飞书登录] 回调缺少 code 参数');
-      return backHome('?login=error');
-    }
-
-    // 校验 state：必须与发起授权时存入 session 的一致
-    const expectedState = req.session.oauthState;
-    delete req.session.oauthState; // 一次性使用
-    if (!expectedState || expectedState !== state) {
-      console.warn('[飞书登录] state 校验失败（可能为 CSRF 或会话过期），已拒绝本次登录');
-      return backHome('?login=error');
-    }
-
-    const cfg = getFeishuConfig();
-    if (!cfg.appId || !cfg.appSecret) {
-      console.error('[飞书登录] 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET 配置');
-      return backHome('?login=error');
-    }
-
-    // 1）code 换 user_access_token（官方 v3 令牌端点，form-urlencoded）
-    const tokenBody = new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: cfg.appId,
-      client_secret: cfg.appSecret,
-      code,
-      redirect_uri: cfg.redirectUri
-    });
-
-    const tokenRes = await fetch(FEISHU_ACCOUNTS_ORIGIN + FEISHU_TOKEN_PATH, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenBody.toString()
-    });
-    const tokenJson = await tokenRes.json().catch(() => null);
-
-    if (!tokenRes.ok || !tokenJson || tokenJson.code !== 0 || !tokenJson.access_token) {
-      console.error('[飞书登录] 换取 user_access_token 失败：', tokenRes.status, tokenJson && (tokenJson.error_description || tokenJson.error || tokenJson.code));
-      return backHome('?login=error');
-    }
-
-    // 2）拿用户身份（身份只信飞书返回，不信浏览器）
-    const userRes = await fetch(FEISHU_OPENAPI_ORIGIN + FEISHU_USER_INFO_PATH, {
-      headers: { Authorization: 'Bearer ' + tokenJson.access_token }
-    });
-    const userJson = await userRes.json().catch(() => null);
-    const info = userJson && userJson.data ? userJson.data : null;
-
-    if (!userRes.ok || !userJson || userJson.code !== 0 || !info || !info.open_id) {
-      console.error('[飞书登录] 获取用户信息失败：', userRes.status, userJson && (userJson.msg || userJson.code));
-      return backHome('?login=error');
-    }
-
-    // 3）同步到 SQLite：以飞书稳定唯一 ID（open_id）为唯一身份，不用姓名做标识
-    //    不存在则 INSERT；存在则更新 name / avatar / updated_at
-    const name = info.name || info.en_name || '飞书用户';
-    const avatar = info.avatar_url || info.avatar_middle || '';
-
-    let dbUser;
-    try {
-      dbUser = upsertFeishuUser({ feishuUserId: info.open_id, name, avatar });
-    } catch (dbErr) {
-      console.error('[飞书登录] 写入 users 表失败：', dbErr);
-      return backHome('?login=error');
-    }
-
-    if (!dbUser || !dbUser.id) {
-      console.error('[飞书登录] 同步用户后未取到数据库主键');
-      return backHome('?login=error');
-    }
-
-    // 4）写入 session（只存业务需要的最小字段；token 不落 session，避免膨胀与泄露面）
-    //    之后所有数据库操作都使用 req.session.user.id，绝不接受前端提交的 user_id
-    req.session.user = {
-      id: dbUser.id,                       // 数据库内部主键（后续所有查询的归属依据）
-      feishuUserId: info.open_id,          // 应用内唯一且稳定，作为主标识
-      unionId: info.union_id || '',
-      tenantKey: info.tenant_key || '',
-      name: dbUser.name || name,
-      avatar: dbUser.avatar || avatar,
-      loginAt: Date.now()
-    };
-
-    req.session.save((err) => {
-      if (err) {
-        console.error('[飞书登录] 保存登录态失败：', err);
-        return backHome('?login=error');
-      }
-      return backHome('');
-    });
+    user = createLocalUser(cred.username, hashPassword(cred.password));
   } catch (err) {
-    console.error('[飞书登录] 回调处理异常：', err);
-    return backHome('?login=error');
+    if (String(err && err.message).indexOf('UNIQUE') > -1) {
+      return res.status(409).json({ success: false, message: '该用户名已被注册' });
+    }
+    throw err;
   }
+  attachSession(req, user);
+  console.log('[注册] 新用户：' + cred.username);
+  return res.status(201).json({ success: true, user: publicUser(user) });
 });
 
-/**
- * GET /api/me
- * 未登录：401 { loggedIn: false }
- * 已登录：{ loggedIn: true, user: { name, avatar, feishuUserId } }
- * 注意：绝不返回 App Secret、token、内部主键等敏感/无关信息。
- */
+/** 登录 */
+router.post('/auth/login', (req, res) => {
+  if (loginLocked(req)) {
+    return res.status(429).json({ success: false, message: '失败次数过多，请 10 分钟后再试' });
+  }
+  const cred = readCredentials(req, res);
+  if (!cred) return undefined;
+  const user = getUserByUsername(cred.username);
+  if (!user || !verifyPassword(cred.password, user.password_hash)) {
+    noteLoginFail(req);
+    return res.status(401).json({ success: false, message: '用户名或密码错误' });
+  }
+  clearLoginFail(req);
+  attachSession(req, user);
+  return res.json({ success: true, user: publicUser(user) });
+});
+
+/** 当前用户 */
 router.get('/api/me', (req, res) => {
   const user = req.session && req.session.user;
-  if (!user || !user.feishuUserId) {
+  if (!user || !user.id) {
     return res.status(401).json({ loggedIn: false });
   }
   return res.json({
     loggedIn: true,
-    user: {
-      name: user.name,
-      avatar: user.avatar,
-      feishuUserId: user.feishuUserId
-    }
+    user: { name: user.name, avatar: user.avatar, userId: user.username || user.feishuUserId }
   });
 });
 
-/**
- * POST /auth/logout
- * 销毁当前会话并清除 Cookie。
- */
+/** 登出 */
 router.post('/auth/logout', (req, res) => {
-  const done = () => {
+  const done = function () {
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
     res.json({ success: true });
   };
-
   if (req.session) {
-    req.session.destroy((err) => {
+    req.session.destroy(function (err) {
       if (err) console.error('[登出] 销毁 session 出错：', err);
       done();
     });

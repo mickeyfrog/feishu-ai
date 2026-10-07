@@ -26,17 +26,12 @@ import session from 'express-session';
 import 'dotenv/config'; // 自动读取项目根目录下的 .env（没有该文件也不会报错）
 
 import { DB_FILE, db } from './database/db.js';
-import authRouter, {
-  SESSION_COOKIE_NAME,
-  getFeishuConfig,
-  isFeishuConfigured,
-  maskSecret
-} from './routes/auth.js';
+import authRouter, { SESSION_COOKIE_NAME } from './routes/auth.js';
 import conversationsRouter from './routes/conversations.js';
 import chatRouter from './routes/chat.js';
 import uploadsRouter from './routes/uploads.js';
 import imagesRouter from './routes/images.js';
-import { isOpenAIConfigured, getAIConfig, MAX_CONTEXT_MESSAGES } from './services/openai.js';
+import { isOpenAIConfigured, getAIConfig, getModelOptions, MAX_CONTEXT_MESSAGES } from './services/openai.js';
 
 // ES Module 中没有 __dirname，需要手动推导
 const currentFile = fileURLToPath(import.meta.url);
@@ -161,9 +156,16 @@ app.get('/api/test', (req, res) => {
   res.json({
     success: true,
     message: '飞书 AI 后端运行正常',
-    feishuLogin: isFeishuConfigured(),
-    aiReady: isOpenAIConfigured()
+    authMode: 'local',
+    aiReady: isOpenAIConfigured(),
+    model: isOpenAIConfigured() ? getAIConfig().model : ''
   });
+});
+
+/** 可选模型列表（模型选择器数据源；只暴露模型名，不含任何密钥） */
+app.get('/api/models', function (req, res) {
+  const models = isOpenAIConfigured() ? getModelOptions() : [];
+  res.json({ success: true, default: isOpenAIConfigured() ? getAIConfig().model : '', models: models });
 });
 
 /* ========================= 业务路由 ========================= */
@@ -219,16 +221,11 @@ const isDirectRun = Boolean(process.argv[1]) && import.meta.url === pathToFileUR
 
 if (isDirectRun) {
   const server = app.listen(PORT, () => {
-    const cfg = getFeishuConfig();
     console.log('组内 AI（feishu-ai）服务已启动 - 第四阶段');
     console.log('访问地址：http://localhost:' + PORT);
     console.log('接口自检：http://localhost:' + PORT + '/api/test');
 
-    if (isFeishuConfigured()) {
-      console.log('飞书登录：已配置（App ID ' + maskSecret(cfg.appId) + '，回调 ' + cfg.redirectUri + '）');
-    } else {
-      console.log('飞书登录：未配置（请在 .env 填写 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_REDIRECT_URI）');
-    }
+    console.log('登录模式：本地注册账号（飞书 OAuth 已于 2026-09-24 下线）');
 
     if (isOpenAIConfigured()) {
       const ai = getAIConfig();

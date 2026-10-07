@@ -11,7 +11,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234c6ef5'/%3E%3Ctext x='16' y='22' font-size='15' font-family='Segoe UI,sans-serif' font-weight='600' text-anchor='middle' fill='%23ffffff'%3EAI%3C/text%3E%3C/svg%3E" />
 
   <!-- 前端资源版本号：改动 app.js/style.css 时 bump，防 Cloudflare 4h 浏览器缓存 -->
-  <link rel="stylesheet" href="/style.css?v=20260920-2" />
+  <link rel="stylesheet" href="/style.css?v=20261007-7" />
 </head>
 <body>
   <div class="app">
@@ -40,13 +40,24 @@
         </button>
       </div>
 
-      <!-- 历史对话：登录飞书后从 /api/conversations 读取当前用户自己的会话 -->
+      <!-- 会话搜索（前端过滤当前列表） -->
+      <div class="chat-search">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <input type="search" id="chatSearch" placeholder="搜索对话…" aria-label="搜索对话" maxlength="50">
+      </div>
+
+      <!-- 历史对话：登录后从 /api/conversations 读取当前用户自己的会话 -->
       <nav class="sidebar-history" aria-label="历史对话">
         <p class="history-label">历史对话</p>
         <ul class="history-list" id="historyList">
           <!-- 由 app.js 渲染当前用户的真实历史会话 -->
         </ul>
-        <p class="history-tip" id="historyTip">登录飞书后，你的对话会保存在这里</p>
+        <p class="history-tip" id="historyTip">登录后，你的对话会保存在这里</p>
       </nav>
 
       <!-- 底部用户区 -->
@@ -54,7 +65,7 @@
         <span class="avatar avatar-sm" id="sidebarAvatar" aria-hidden="true">U</span>
         <span class="user-text">
           <span class="user-name" id="sidebarUserName">当前用户</span>
-          <span class="user-status" id="userStatus">未登录飞书</span>
+          <span class="user-status" id="userStatus">未登录</span>
         </span>
         <button type="button" class="btn-logout" id="logoutBtn" hidden>退出</button>
       </div>
@@ -75,13 +86,32 @@
             </svg>
           </button>
           <h1 class="topbar-title">组内 AI</h1>
-          <span class="model-chip" id="modelChip" title="AI 接入状态">
-            <span class="dot" aria-hidden="true"></span>
-            <span id="modelChipText">检测中…</span>
-          </span>
+          <div class="model-picker">
+            <button type="button" class="model-chip" id="modelChip" title="切换模型" aria-haspopup="listbox" aria-expanded="false">
+              <span class="dot" aria-hidden="true"></span>
+              <span id="modelChipText">检测中…</span>
+              <svg class="model-caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+                <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div class="model-menu" id="modelMenu" role="listbox" hidden></div>
+          </div>
         </div>
 
         <div class="topbar-right">
+          <button type="button" class="theme-toggle" id="themeToggle" aria-label="切换深色 / 浅色主题" title="切换深色 / 浅色主题">
+            <span class="icon-moon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="icon-sun" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none">
+                <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </span>
+          </button>
           <button type="button" class="btn-image-gen" id="imageGenBtn" title="用 AI 生成图片">生图</button>
           <span class="backend-state" id="backendState" title="后端连接状态">检测中…</span>
           <!-- 登录态区域：由 app.js 依据 GET /api/me 渲染（登录按钮 或 头像+姓名） -->
@@ -102,7 +132,19 @@
               </svg>
             </div>
             <h2 class="welcome-title">有什么可以帮忙的？</h2>
-            <p class="welcome-sub">登录飞书后即可开始对话：每个人的会话与上下文相互独立，聊天记录保存在服务器，刷新后仍然存在。</p>
+            <p class="welcome-sub">登录后即可开始对话：每个人的会话与上下文相互独立，聊天记录保存在服务器，刷新后仍然存在。</p>
+
+            <!-- 本地账号 登录/注册 面板（未登录时由 app.js 显示） -->
+            <div class="auth-panel" id="authPanel" hidden>
+              <div class="auth-tabs" role="tablist">
+                <button type="button" class="auth-tab is-active" id="tabLogin">登录</button>
+                <button type="button" class="auth-tab" id="tabRegister">注册</button>
+              </div>
+              <input id="authUsername" class="auth-input" maxlength="32" placeholder="用户名（2~32 位）" autocomplete="username">
+              <input id="authPassword" class="auth-input" type="password" maxlength="128" placeholder="密码（至少 6 位）" autocomplete="current-password">
+              <button type="button" id="authSubmit" class="btn-primary auth-submit">登 录</button>
+              <p class="auth-error" id="authError" role="alert"></p>
+            </div>
 
             <div class="suggestions" id="suggestions">
               <button type="button" class="suggestion-card" data-text="解释一下 Buck 电路">
@@ -211,6 +253,6 @@
   <!-- 第三方库：Markdown 解析 + XSS 清理（由后端从 node_modules 提供，不复制进 public/） -->
   <script src="/vendor/marked.umd.js" defer></script>
   <script src="/vendor/purify.min.js" defer></script>
-  <script src="/app.js?v=20260920-2" defer></script>
+  <script src="/app.js?v=20261007-6" defer></script>
 </body>
 </html>

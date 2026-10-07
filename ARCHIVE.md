@@ -559,3 +559,38 @@ DuckDuckGo 由转移链自动兜底。实测今日新闻 2.7s 出 5 条当日结
 **教训（同日）**：cloudflared 2026.9.1 已删除 --protocol flag（help 里无此项），
 强行加 http2 导致隧道起不来（进程不报错、~100s 自动优雅退出再被拉起，循环）。
 已把 fix-cloudflared-service.ps1 改为还原版（同一文件，用户再双击一次即可恢复）；崩溃自愈策略保留。
+
+---
+
+## 第十阶段 - 界面改版 + Open WebUI 功能模块移植（2026-10-07）
+
+**需求**：把模型从 kimi-k3 换成 gpt-6.1-sol；参考 open-webui/open-webui 设计前端「功能模块」。
+
+**模型切换**：AI_MODEL=gpt-6.1-sol（.env），实测文本 / 视觉（正确读出截图文字）/ 流式全部通过；
+  新增 AI_MODEL_OPTIONS=gpt-6.1-sol,kimi-k3,gpt-5.6-sol（三个都实测可用），前端可在界面里切换。
+
+**调研**（agent-reach / gh CLI 读 open-webui 仓库）：
+- 设计 token：oklch 中性灰阶 + blue-600 主色 + Inter 字体栈 + 完整暗色模式
+- 功能模块：模型选择器、消息操作条（copy/regenerate/edit/delete）、停止生成、代码块复制、导出、搜索
+
+**改动**：
+- 设计层：style.css 换 token（浅/暗两套）+ 追加 Open WebUI 风格覆盖层；新增暗色修正层
+  （清掉历史遗留的硬编码白色 / 深色渐变文字，含 composer focus-within 白底 bug）
+- 服务端：
+  · services/openai.js：getModelOptions/isAllowedModel；请求体支持按请求覆盖模型
+  · server.js：GET /api/models；/api/test 增加 model 字段
+  · routes/chat.js：流式支持 regenerate（删旧回答后重答）+ model（白名单校验）；
+    start 事件回传 userMessageId、done 回传 model（消息表新增 model 列，幂等迁移）
+  · routes/conversations.js：PATCH/DELETE 消息接口（编辑=删其后内容；删除=该消息及之后，含附件清理）
+  · database/db.js：messages.model 迁移、getLastMessage/getLastUserMessage/updateMessageContent/
+    deleteMessagesFrom/listAttachmentsFromMessage 等
+- 前端：模型下拉选择器、消息操作条（hover）、行内编辑、停止生成（按钮变方块并中断请求，
+  半截内容不落库）、代码块复制按钮、导出 Markdown、侧边栏会话搜索、主题切换、上传中禁用发送
+  （修上传竞态：附件未上传完不允许发送，避免消息漏掉附件）
+
+**测试**：全量 400 项全绿（9 套件 336 + e2e-auth 12 + e2e-stage4 52）；
+  同步更新：e2e 桩（/api/models）、chip 断言（模型名）、菜单项断言（含导出）、
+  生成中按钮断言（改为「停止」语义）、删除改为按文本点击（菜单项不再固定索引）
+
+**真实验收**：浏览器里逐项验证模型切换 / 重新生成 / 编辑重答 / 停止生成 / 代码复制 / 导出 /
+  暗色模式 / 会话搜索 / 上传附件竞态修复

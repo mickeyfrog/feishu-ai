@@ -22,8 +22,19 @@ import {
   renameConversationForUser,
   deleteConversationForUser,
   listMessages,
-  listBoundAttachments
+  listBoundAttachments,
+  getMessageById,
+  updateMessageContent,
+  deleteMessagesFrom,
+  listAttachmentsFromMessage,
+  deleteAttachmentsFromMessage
 } from '../database/db.js';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const here2 = path.dirname(fileURLToPath(import.meta.url));
+const UPLOAD_ROOT2 = path.join(here2, '..', 'data', 'uploads');
 
 const router = Router();
 
@@ -139,6 +150,63 @@ router.get('/:id/messages', (req, res) => {
     conversation: publicConversation(conversation),
     messages: withAtts
   });
+});
+
+/** 删除「该消息及其之后」的全部消息，并清理这些消息绑定的附件（记录 + 磁盘文件） */
+function purgeMessagesFrom(conversation, userId, fromMessageId) {
+  const atts = listAttachmentsFromMessage(conversation.id, fromMessageId);
+  const removed = deleteMessagesFrom(conversation.id, fromMessageId);
+  deleteAttachmentsFromMessage(conversation.id, fromMessageId);
+  for (const att of atts) {
+    try { fs.rmSync(path.join(UPLOAD_ROOT2, String(userId), path.basename(att.storedName)), { force: true }); } catch (e) { /* 忽略磁盘清理失败 */ }
+  }
+  return removed;
+}
+
+/** 校验消息归属：消息必须存在于当前用户的会话里 */
+function loadOwnedMessage(req, res) {
+  const id = Number(req.params.messageId);
+  if (!Number.isInteger(id) || id <= 0) { res.status(404).json({ success: false, message: '消息不存在' }); return null; }
+  const conversation = loadOwnedConversation(req, res);
+  if (!conversation) return null;
+  const message = getMessageById(id);
+  if (!message || message.conversationId !== conversation.id) {
+    res.status(404).json({ success: false, message: '消息不存在' });
+    return null;
+  }
+  return { conversation: conversation, message: message };
+}
+
+/**
+ * PATCH /api/conversations/:id/messages/:messageId
+ * 编辑一条「用户消息」：改写内容，并删除它之后的全部消息（旧回答作废）。
+ * 前端随后会调用 regenerate 让模型基于新问题重新回答。
+ */
+router.patch('/:id/messages/:messageId', (req, res) => {
+  const found = loadOwnedMessage(req, res);
+  if (!found) return undefined;
+  if (found.message.role !== 'user') {
+    return res.status(400).json({ success: false, message: '只能编辑自己发送的消息' });
+  }
+  const content = req.body && typeof req.body.content === 'string' ? req.body.content.trim() : '';
+  if (!content) return res.status(400).json({ success: false, message: '内容不能为空' });
+  if (content.length > 4000) return res.status(400).json({ success: false, message: '内容过长（最多 4000 字）' });
+
+  updateMessageContent(found.message.id, content);
+  const removed = purgeMessagesFrom(found.conversation, req.session.user.id, found.message.id + 1);
+  return res.json({ success: true, messageId: found.message.id, removedAfter: removed });
+});
+
+/**
+ * DELETE /api/conversations/:id/messages/:messageId
+ * 删除该消息及其之后的全部消息（同时清理绑定附件）。
+ */
+router.delete('/:id/messages/:messageId', (req, res) => {
+  const found = loadOwnedMessage(req, res);
+  if (!found) return undefined;
+
+  const removed = purgeMessagesFrom(found.conversation, req.session.user.id, found.message.id);
+  return res.json({ success: true, removed: removed });
 });
 
 export default router;
