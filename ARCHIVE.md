@@ -594,3 +594,24 @@ DuckDuckGo 由转移链自动兜底。实测今日新闻 2.7s 出 5 条当日结
 
 **真实验收**：浏览器里逐项验证模型切换 / 重新生成 / 编辑重答 / 停止生成 / 代码复制 / 导出 /
   暗色模式 / 会话搜索 / 上传附件竞态修复
+
+---
+
+## 运维 - 502 复发根因与看门狗（2026-10-08）
+
+**现象**：13:04 公网再次 502。排查发现：机器并未重启（已开机 5 天），
+但 supervisor 与 server.js 进程都消失了 —— 守护进程本身被杀，没有更上层的守卫。
+（supervisor 日志停在 10-07 14:43，之后无任何记录）
+
+**修复**：新增 work/watchdog.ps1 + Windows 计划任务 feishu-ai-watchdog（每 3 分钟）：
+  1. 探测 http://127.0.0.1:3000/api/test，不健康就清端口 -> 缺 supervisor 则拉起 -> 6s 后复检
+  2. 探测 9222，调试 Chrome 不在就拉起（生图 / 浏览器对话依赖）
+  只在实际执行了恢复动作时写日志（%TEMP%/feishu-ai-watchdog.log），不刷屏
+
+**层级设计**：
+  - supervisor.mjs：子进程崩溃秒级重启（日志：feishu-ai-supervisor.log）
+  - watchdog.ps1（计划任务，3 分钟）：supervisor 本身被杀 / 卡死（日志：feishu-ai-watchdog.log）
+  - start-at-logon.ps1（启动文件夹）：开机登录自启（supervisor + Chrome）
+
+**实测**：杀光全部 node 与 chrome 进程后运行看门狗 —— 6 秒内服务恢复 200、Chrome 9222 拉起；
+计划任务手动触发验证通过（Next Run 每 3 分钟）

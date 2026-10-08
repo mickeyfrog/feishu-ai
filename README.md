@@ -700,3 +700,19 @@ AI_BROWSER_PROJECT_URL=https://chatgpt.com/g/<你的项目id>/project
 - `PATCH /api/conversations/:id/messages/:messageId`：编辑用户消息（删除其后内容）
 - `DELETE /api/conversations/:id/messages/:messageId`：删除该消息及其之后的内容（含绑定附件）
 - `POST /api/conversations/:id/chat/stream`：新增 `regenerate` / `model` 字段；start 事件回传 `userMessageId`，done 事件回传 `model`
+
+## 十七、运维与自愈（Windows）
+
+三层守护，任一层挂掉都有上层拉起：
+
+| 层 | 触发 | 职责 | 日志 |
+| --- | --- | --- | --- |
+| `start-at-logon.ps1`（启动文件夹 VBS） | 开机登录 | 拉起 supervisor + 调试 Chrome | — |
+| `supervisor.mjs` | 子进程退出 | 秒级重启 server.js（5 分钟最多 5 次） | `%TEMP%\feishu-ai-supervisor.log` |
+| `work/watchdog.ps1`（计划任务 `feishu-ai-watchdog`，每 3 分钟） | supervisor 被杀 / 服务无响应 | 清端口 → 拉起 supervisor → 复检；顺带保活 9222 | `%TEMP%\feishu-ai-watchdog.log` |
+
+手动重启（含归档、端口归属校验、自检）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File work\restart-feishu-ai.ps1
+```
